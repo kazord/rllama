@@ -23,6 +23,8 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 #[cfg(feature = "server")]
 use std::sync::RwLock;
+#[cfg(feature = "speech")]
+use tts::*;
 
 // Refer to README.md to see what all these options mean.
 #[derive(Parser, Clone)]
@@ -57,6 +59,9 @@ struct Cli {
     is_interactive: bool,
     #[arg(long, action)]
     show_interactions: bool,
+
+    #[arg(long, action)]
+    speak: bool,
 
     #[arg(long)]
     max_seq_len: Option<usize>,
@@ -145,6 +150,13 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_interactive = cli.start_interactive;
     let is_interactive = cli.is_interactive || start_interactive;
     let show_interactions = cli.show_interactions;
+    
+    let speak = cli.speak;
+    #[cfg(not(feature = "speech"))]
+    if cli.speak {
+        eprintln!("Text to speech is not enabled in this build.");
+        return Err("Text to speech is not enabled in this build.".into());
+    }
     #[cfg(not(feature = "server"))]
     if cli.inference_server {
         eprintln!("Inference server is not enabled in this build.");
@@ -315,6 +327,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
             start_interactive,
             is_interactive,
             show_interactions,
+            speak,
             be_quiet,
             max_seq_len,
             params.clone(),
@@ -731,6 +744,7 @@ fn command_line_inference(
     start_interactive: bool,
     is_interactive: bool,
     show_interactions: bool,
+    speak: bool,
     be_quiet: bool,
     max_seq_len: usize,
     params: ModelParams,
@@ -744,6 +758,8 @@ fn command_line_inference(
             }
         };
     }
+    #[cfg(feature = "speech")]
+    let mut tts = Tts::default()?;
 
     let mut prompt = prompt;
 
@@ -828,6 +844,8 @@ fn command_line_inference(
     let mut stop_seen: bool = false;
     let mut interactive = start_interactive;
     let mut user_token: Vec<TokenId> = vec![];
+    #[cfg(feature = "speech")]
+    let mut tok_speak: String = "".to_string();
     while toks_id.len() < max_seq_len {
         let now = std::time::Instant::now();
         let preds = tr.forward(&toks_id[prev_pos..], prev_pos, &mut caches);
@@ -915,6 +933,24 @@ fn command_line_inference(
                     "{}",
                     tok_print.truecolor(128 + redness / 2, 255 - redness / 2, 128)
                 );
+                #[cfg(feature = "speech")]
+                if speak
+                {
+                    tok_speak += tok_print.as_str();
+                    if tok_speak.ends_with(".")
+                        || (tok_speak.ends_with(",") && !tts.is_speaking()?)
+                        || tok_speak.ends_with("?")
+                        || tok_speak.ends_with("!")
+                        || tok_speak.ends_with("</s>")
+                        || tok_speak.ends_with("\n")
+                    {
+                        tts.speak(tok_speak.clone(), false)?;
+                        tok_speak.clear();
+                    }
+                }
+                
+                
+
             };
             if !first
                 && tok_id == stop_tokens.last().unwrap()

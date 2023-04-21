@@ -38,10 +38,12 @@ rocket = { version = "0.4", features = ["sse"], optional = true }
 lazy_static = "1.4"
 zip = "0.6"
 ouroboros = "0.15"
+tts = {version = "0.25.5", optional = true }
 
 [features]
 opencl = ["ocl"]
 server = ["rocket"]
+speech = ["tts"]
 
 # We need protobuf compiler
 [build-dependencies]
