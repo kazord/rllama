@@ -7,6 +7,7 @@ pub mod huggingface_loader;
 pub mod model_params;
 pub mod protomodels;
 pub mod rllama_main;
+pub mod rllama_cli;
 pub mod semaphore;
 pub mod simd_support;
 pub mod tensor;

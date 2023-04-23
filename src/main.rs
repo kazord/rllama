@@ -13,5 +13,5 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 pub fn main() -> Result<(), Box<dyn std::error::Error>> {
-    rllama::rllama_main::main()
+    rllama::rllama_cli::main()
 }
