@@ -170,8 +170,24 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         (Some(ref sys_position), Some(ref user_position)) => {
             (&prompt[0..*sys_position],&prompt[*sys_position+15..*user_position],&prompt[*user_position+12..])
         }
-        _ => {
-            ("","","")
+        (Some(ref sys_position), None) => {
+            if prompt.len() == sys_position+15 {
+                (&prompt[0..*sys_position],"","")
+            }
+            else { //assume user query go after prompt
+                (&prompt[0..*sys_position],&prompt[*sys_position+15..],"")
+            }  
+        }
+        (None, Some(ref user_position)) => {
+            if prompt.len() == user_position+12 {
+                ("",&prompt[0..*user_position],"")
+            }
+            else { //assume there is no system prompt
+                ("",&prompt[0..*user_position],&prompt[*user_position+12..])
+            }
+        }
+        (None,None) => {
+            (prompt.as_str(),"","")
         }
     };
     let (start_interactive, user_query): (bool, String) = match cli.query {
@@ -179,13 +195,13 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
             (query.is_empty(), query.to_string())
         }
         _ => {
-            (true, "".to_string())
+            (cli.is_interactive || !interactive_prompt_prefix.is_empty(), "".to_string())
         }
     };
     pln!("Prompt loaded {} {} {}", interactive_system_prompt, interactive_prompt_prefix, interactive_prompt_postfix);
     let interactive_stop = interactive_prompt_prefix;
     
-    let is_interactive = cli.is_interactive || start_interactive;
+    let is_interactive = cli.is_interactive;
     let show_interactions = cli.show_interactions;
 
 
@@ -367,10 +383,16 @@ fn command_line_inference(
         "  This is the color of the generated text".truecolor(128, 255, 128)
     );
     pln!("---");
-    print!("{}{}{}{}", interactive_system_prompt.truecolor(128, 128, 255),
-        interactive_prompt_prefix.truecolor(128, 128, 255),
-        query.as_str(),
-        interactive_prompt_postfix.truecolor(128, 128, 255));
+    if !start_interactive {
+        print!("{}{}{}{}", interactive_system_prompt.truecolor(128, 128, 255),
+            interactive_prompt_prefix.truecolor(128, 128, 255),
+            query.as_str(),
+            interactive_prompt_postfix.truecolor(128, 128, 255));
+    }
+    else {
+        print!("{}{}", interactive_system_prompt.truecolor(128, 128, 255),
+        interactive_prompt_prefix.truecolor(128, 128, 255));
+    }
 
     let _ = std::io::stdout().flush();
 
@@ -417,12 +439,12 @@ fn command_line_inference(
             user_token.append(&mut tok.more_tokenize_to_ids(newinput.clone()));
             
             interactive = false;
-        if !show_interactions {
+            if !show_interactions {
                 if interactive_prompt_postfix.starts_with('\n') {
                     //is that safe ?
                     print!("{}", &interactive_prompt_postfix[1..].truecolor(128, 128, 255));
                 }
-                if interactive_prompt_postfix.starts_with('\r') {
+                else if interactive_prompt_postfix.starts_with('\r') {
                     //is that safe ? windows prompt file...
                     print!("{}", &interactive_prompt_postfix[2..].truecolor(128, 128, 255));
                 }
@@ -500,7 +522,7 @@ fn command_line_inference(
                     [prev_pos + 1 + tok_idx - (stop_tokens.len() - 1)..prev_pos + 1 + tok_idx + 1]
                     == stop_tokens
             {
-                if is_interactive {
+                if is_interactive && user_token.len() == 0 {
                     interactive = true;
                 }
             }
