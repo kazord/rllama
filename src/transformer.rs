@@ -1,6 +1,6 @@
 use crate::data_source::DataSource;
 use crate::embedding::Embedding;
-use crate::tensor::{FromPiecesDirection, Tensor, TensorDType};
+use crate::tensor::{Movable, FromPiecesDirection, Tensor, TensorDType};
 #[cfg(feature = "opencl")]
 use crate::tensor_opencl_support::OpenCL;
 use crate::tokenizer::TokenId;
@@ -231,9 +231,9 @@ pub struct Attention {
 
 #[allow(dead_code)]
 pub struct FeedForward {
-    w1: Tensor,
-    w2: Tensor,
-    w3: Tensor,
+    w1: Movable,
+    w2: Movable,
+    w3: Movable,
     data_settings: DataSettings,
 }
 
@@ -486,24 +486,24 @@ impl FeedForward {
         data_source: DataSource,
         data_settings: DataSettings,
     ) -> Result<FeedForward, UnpicklingError> {
-        let mut w1 = Tensor::from_unpickled_pieces2(
+        let mut w1 = Movable::CPU(Tensor::from_unpickled_pieces2(
             format!("layers.{}.feed_forward.w1.weight", layer_id),
             format!("model.layers.{}.mlp.gate_proj.weight", layer_id),
             data_source.clone(),
             FromPiecesDirection::Rows,
-        )?;
-        let mut w2 = Tensor::from_unpickled_pieces2(
+        )?);
+        let mut w2 = Movable::CPU(Tensor::from_unpickled_pieces2(
             format!("layers.{}.feed_forward.w2.weight", layer_id),
             format!("model.layers.{}.mlp.down_proj.weight", layer_id),
             data_source.clone(),
             FromPiecesDirection::Cols,
-        )?;
-        let mut w3 = Tensor::from_unpickled_pieces2(
+        )?);
+        let mut w3 = Movable::CPU(Tensor::from_unpickled_pieces2(
             format!("layers.{}.feed_forward.w3.weight", layer_id),
             format!("model.layers.{}.mlp.up_proj.weight", layer_id),
             data_source.clone(),
             FromPiecesDirection::Rows,
-        )?;
+        )?);
 
         if data_settings.force_f16 {
             w1 = w1.to_f16();
@@ -536,8 +536,10 @@ impl FeedForward {
 
     pub fn forward(&self, x: &mut Tensor) -> Tensor {
         let original_x_dtype = x.dtype();
+        let mut  x:Movable = Movable::CPU(x.clone());
+        //TODO
         if x.dtype() != self.w1.dtype() {
-            *x = x.to_same_type(&self.w1);
+            x = x.to_same_type_(&self.w1);
         }
       /*  #[cfg(feature = "opencl")]
         let x_was_on_cpu: bool;
@@ -549,9 +551,10 @@ impl FeedForward {
                     .unwrap();
             }
         }*/
+        
         let (mut w1_out, mut w3_out) = rayon::join(
-            || self.w1.matrix_mul_transposed(x),
-            || self.w3.matrix_mul_transposed(x),
+            || self.w1.matrix_mul_transposed_(&x),
+            || self.w3.matrix_mul_transposed_(&x),
         );
 
         // Float16 not supported for some of these ops on CPU.
@@ -560,15 +563,16 @@ impl FeedForward {
             w3_out = w3_out.to_f32();
         }
         let w1_out = w1_out.silu();
-        let mut w1w3_out = w1_out.hadamard_product(&w3_out).transpose();
+        let mut w1w3_out = w1_out.hadamard_product_(&w3_out).transpose_();
+        
         if w1w3_out.dtype() != self.w2.dtype() {
-            w1w3_out = w1w3_out.to_same_type(&self.w2);
+            w1w3_out = w1w3_out.to_same_type_(&self.w2);
         }
         //#[cfg(not(feature = "opencl"))]
         {
             self.w2
-                .matrix_mul_transposed(&w1w3_out)
-                .into_dtype(original_x_dtype)
+                .matrix_mul_transposed_(&w1w3_out)
+                .into_dtype_(original_x_dtype).to_tensor()
         }
         /*#[cfg(feature = "opencl")]
         {

@@ -53,6 +53,132 @@ pub enum TensorDType {
     Float32,
 }
 
+
+#[cfg(feature = "opencl")]
+#[derive(Debug)]
+#[derive(Clone)]
+pub struct Moving {
+    opencl_data: Arc<RwLock<Option<OpenCLTensor>>>,
+    waiting_for_data: Option<OpenCLEvent>
+}
+
+
+#[derive(Debug)]
+pub enum Movable {
+    CPU(Tensor),
+    #[cfg(feature = "opencl")]
+    GPU(OpenCLTensor),
+    #[cfg(feature = "opencl")]
+    Moving(Moving)
+}
+
+impl Movable {
+    pub fn to_f16(&self) -> Movable {
+        match &self {
+            Movable::CPU(t) => Movable::CPU(t.to_f16()),
+            //TODO
+            #[cfg(feature = "opencl")]
+            Movable::GPU(_) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            Movable::Moving(_) => unimplemented!(),
+        }
+    }
+    pub fn to_f32(&self) -> Movable {
+        match &self {
+            Movable::CPU(t) => Movable::CPU(t.to_f32()),
+            //TODO
+            #[cfg(feature = "opencl")]
+            Movable::GPU(_) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            Movable::Moving(_) => unimplemented!(),
+        }
+    }
+    #[inline]
+    pub fn dtype(&self) -> TensorDType {
+        match &self {
+            Movable::CPU(t) => t.dtype,
+                        //TODO
+            #[cfg(feature = "opencl")]
+            Movable::GPU(_) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            Movable::Moving(_) => unimplemented!(),
+        }
+    }
+    
+    pub fn matrix_mul_transposed_(&self, other: &Movable) -> Movable {
+        match (&self, other) {
+            (Movable::CPU(s),Movable::CPU(o)) => Movable::CPU(s.matrix_mul_transposed(o)),
+            
+            //TODO
+            (Movable::CPU(s),_) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            (Movable::GPU(_), _) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            (Movable::Moving(_), _) => unimplemented!(),
+        }
+    }
+    pub fn into_dtype_(self, dtype: TensorDType) -> Movable {
+        match &self {
+            Movable::CPU(t) => Movable::CPU(t.clone().into_dtype(dtype)),
+            #[cfg(feature = "opencl")]
+            Movable::GPU(_) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            Movable::Moving(_) => unimplemented!(),
+        }
+    }
+    pub fn silu(&self) -> Movable {
+        match &self {
+            Movable::CPU(t) => Movable::CPU(t.silu_cpu()),
+            #[cfg(feature = "opencl")]
+            Movable::GPU(_) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            Movable::Moving(_) => unimplemented!(),
+        }
+    }
+    //TODO remove it
+    pub fn to_tensor(&self) -> Tensor {
+        match &self {
+             Movable::CPU(t) => t.clone(),
+            #[cfg(feature = "opencl")]
+            Movable::GPU(_) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            Movable::Moving(_) => unimplemented!(),
+        }
+    }
+    
+     pub fn hadamard_product_(&self, other: &Movable) -> Movable {
+         match (&self, other) {
+            (Movable::CPU(s),Movable::CPU(o)) => Movable::CPU(s.hadamard_product(o)),
+            //TODO
+            (Movable::CPU(s),_) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            (Movable::GPU(_), _) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            (Movable::Moving(_), _) => unimplemented!(),
+        }
+     }
+     pub fn transpose_(&self) -> Movable {
+        match &self {
+             Movable::CPU(t) => Movable::CPU(t.transpose_cpu()),
+            #[cfg(feature = "opencl")]
+             Movable::GPU(_) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            Movable::Moving(_) => unimplemented!(),
+        }
+    }
+    pub fn to_same_type_(&self, other: &Movable) -> Movable {
+         match (&self, other) {
+            (Movable::CPU(s),Movable::CPU(o)) => Movable::CPU(s.to_same_type(o)),
+            //TODO
+            (Movable::CPU(s),_) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            (Movable::GPU(_), _) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            (Movable::Moving(_), _) => unimplemented!(),
+        }
+     }
+}
+
 #[derive(Error, Debug)]
 pub enum TensorError {
     #[error("IO error: {0}")]
@@ -88,22 +214,7 @@ impl TensorDType {
     }
 }
 
-#[cfg(feature = "opencl")]
-#[derive(Debug)]
-pub struct TensorMoving {
-    opencl_data: Arc<RwLock<Option<OpenCLTensor>>>,
-    waiting_for_data: Option<OpenCLEvent>
-}
 
-
-#[derive(Debug)]
-pub enum TensorMovable {
-    CPU(Tensor),
-    #[cfg(feature = "opencl")]
-    GPU(OpenCLTensor),
-    #[cfg(feature = "opencl")]
-    Moving(TensorMoving)
-}
 
 #[derive(Debug)]
 pub struct Tensor {
@@ -1066,12 +1177,24 @@ impl Tensor {
         if result.dtype() == other.dtype() {
             return result;
         }
-        match other.dtype {
+        match other.dtype() {
             TensorDType::K4BitQuantization => unimplemented!(),
             TensorDType::Float32 => self.to_f32(),
             TensorDType::Float16 => self.to_f16(),
         }
-    }
+    }/*
+    pub fn to_same_type(&self, other: &Movable) -> Tensor {
+        let result = self.clone();
+        if result.dtype() == other.dtype() {
+            return result;
+        }
+        match other.dtype() {
+            TensorDType::K4BitQuantization => unimplemented!(),
+            TensorDType::Float32 => self.to_f32(),
+            TensorDType::Float16 => self.to_f16(),
+        }
+    }*/
+
 
     pub fn into_same_type(self, other: &Tensor) -> Tensor {
         if self.dtype() == other.dtype() {
