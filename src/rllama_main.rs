@@ -46,7 +46,7 @@ struct Cli {
     #[arg(long)]
     interactive_system_prompt: Option<String>,
     #[arg(long)]
-    interactive_stop: String,
+    interactive_stop: Option<String>,
     #[arg(long)]
     interactive_prompt_postfix: Option<String>,
     #[arg(long)]
@@ -112,7 +112,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokenizer_path = cli.tokenizer_path.clone();
     let param_path = cli.param_path.clone();
     let interactive_system_prompt = cli.interactive_system_prompt.clone().unwrap_or("A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, terse answers to the human's questions.### Human:".to_string());
-    let mut interactive_stop = cli.interactive_stop.clone();
+    let mut interactive_stop = cli.interactive_stop.clone().unwrap_or("</s>".to_string());
     /*if interactive_stop.is_empty() {
         // Desperado to catch all weird variants of ###Human the model might spit out.
         interactive_stop = vec![
@@ -186,7 +186,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     #[cfg(feature = "opencl")]
-    let opencl: Option<OpenCL> = {
+    let opencl: Option<OpenCL> = None /*{
         let opencl_device = cli.opencl_device.unwrap_or(0);
         match OpenCL::new(!be_quiet, opencl_device) {
             Err(openclerr) => {
@@ -199,7 +199,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(opencl)
             }
         }
-    };
+    }*/;
 
     #[cfg(feature = "opencl")]
     let has_opencl = opencl.is_some();

@@ -511,7 +511,8 @@ impl FeedForward {
             w3 = w3.to_f16();
         }
 
-        #[cfg(feature = "opencl")]
+       /* TODO
+       #[cfg(feature = "opencl")]
         {
             if data_settings.use_opencl_for_feedforward {
                 w1 = w1.to_f16();
@@ -522,7 +523,7 @@ impl FeedForward {
                 w2.to_gpu_inplace(&ds.cl.as_ref().unwrap().clone()).unwrap();
                 w3.to_gpu_inplace(&ds.cl.unwrap()).unwrap();
             }
-        }
+        }*/
         // w1, w2, w3 maybe be f32 or f16 depending on source data.
 
         Ok(Self {
@@ -538,23 +539,23 @@ impl FeedForward {
         if x.dtype() != self.w1.dtype() {
             *x = x.to_same_type(&self.w1);
         }
-        #[cfg(feature = "opencl")]
+      /*  #[cfg(feature = "opencl")]
         let x_was_on_cpu: bool;
         #[cfg(feature = "opencl")]
-        {
+        { TODO
             x_was_on_cpu = x.is_on_cpu();
             if self.data_settings.use_opencl_for_feedforward {
                 x.to_gpu_inplace(self.data_settings.cl.as_ref().unwrap())
                     .unwrap();
             }
-        }
+        }*/
         let (mut w1_out, mut w3_out) = rayon::join(
             || self.w1.matrix_mul_transposed(x),
             || self.w3.matrix_mul_transposed(x),
         );
 
         // Float16 not supported for some of these ops on CPU.
-        if w1_out.is_on_cpu() && w1_out.dtype() == TensorDType::Float16 {
+        if w1_out.dtype() == TensorDType::Float16 {
             w1_out = w1_out.to_f32();
             w3_out = w3_out.to_f32();
         }
@@ -563,13 +564,13 @@ impl FeedForward {
         if w1w3_out.dtype() != self.w2.dtype() {
             w1w3_out = w1w3_out.to_same_type(&self.w2);
         }
-        #[cfg(not(feature = "opencl"))]
+        //#[cfg(not(feature = "opencl"))]
         {
             self.w2
                 .matrix_mul_transposed(&w1w3_out)
                 .into_dtype(original_x_dtype)
         }
-        #[cfg(feature = "opencl")]
+        /*#[cfg(feature = "opencl")]
         {
             let mut result = self.w2.matrix_mul_transposed(&w1w3_out);
             if x_was_on_cpu {
@@ -578,7 +579,7 @@ impl FeedForward {
             } else {
                 result
             }
-        }
+        }*/
     }
 }
 
@@ -628,7 +629,7 @@ impl Attention {
             wo = wo.to_f16();
         }
 
-        #[cfg(feature = "opencl")]
+        /* TODO#[cfg(feature = "opencl")]
         {
             if data_settings.use_opencl_for_attention {
                 wq = wq.to_f16();
@@ -641,7 +642,7 @@ impl Attention {
                 wv.to_gpu_inplace(&ds.cl.as_ref().unwrap().clone()).unwrap();
                 wo.to_gpu_inplace(&ds.cl.unwrap()).unwrap();
             }
-        }
+        }*/
 
         Ok(Self {
             wq,
@@ -667,7 +668,7 @@ impl Attention {
             *x = x.to_same_type(&self.wq);
         }
 
-        #[cfg(feature = "opencl")]
+      /*  #[cfg(feature = "opencl")]
         let x_was_on_cpu: bool;
         #[cfg(feature = "opencl")]
         {
@@ -676,10 +677,10 @@ impl Attention {
                 x.to_gpu_inplace(self.data_settings.cl.as_ref().unwrap())
                     .unwrap();
             }
-        }
+        }*/
 
         let seq_len = x.rows();
-        #[cfg(feature = "opencl")]
+       /*TODO #[cfg(feature = "opencl")]
         let (xq_out, xk_out, xv_out) = {
             let mut xq_out = x.matrix_mul_transposed(&self.wq);
             let mut xk_out = x.matrix_mul_transposed(&self.wk);
@@ -690,7 +691,7 @@ impl Attention {
             (xq_out.to_f32(), xk_out.to_f32(), xv_out.to_f32())
         };
 
-        #[cfg(not(feature = "opencl"))]
+        #[cfg(not(feature = "opencl"))]*/
         let (xq_out, (xk_out, xv_out)) = rayon::join(
             || x.matrix_mul_transposed(&self.wq).to_f32(),
             || {
@@ -800,16 +801,16 @@ impl Attention {
                     let mut xq_row = Tensor::concat(&concat_vec2)
                         .view(1, self.wo.rows())
                         .to_f16();
-                    if self.wo.is_on_gpu() {
+                    /* TODO if self.wo.is_on_gpu() {
                         xq_row
                             .to_gpu_inplace(&self.data_settings.cl.as_ref().unwrap())
                             .unwrap();
                         let mut result = xq_row.matrix_mul_transposed(&self.wo);
                         result.to_cpu_inplace().unwrap();
                         result.to_f32()
-                    } else {
+                    } else {*/
                         xq_row.matrix_mul_transposed(&self.wo)
-                    }
+                   // }
                 }
             })
             .collect();

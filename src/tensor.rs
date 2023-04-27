@@ -88,22 +88,28 @@ impl TensorDType {
     }
 }
 
+#[cfg(feature = "opencl")]
+#[derive(Debug)]
+pub struct TensorMoving {
+    opencl_data: Arc<RwLock<Option<OpenCLTensor>>>,
+    waiting_for_data: Option<OpenCLEvent>
+}
+
+
+#[derive(Debug)]
+pub enum TensorMovable {
+    CPU(Tensor),
+    #[cfg(feature = "opencl")]
+    GPU(OpenCLTensor),
+    #[cfg(feature = "opencl")]
+    Moving(TensorMoving)
+}
+
 #[derive(Debug)]
 pub struct Tensor {
     data: *mut u8,
-
-    // for quantization, only used if dtype == TensorDType::K4BitQuantization
-    // Contains 16 values per row in f16 (i.e. 32 bytes per row)
-    q4_data: *mut u8,
-
-    #[cfg(feature = "opencl")]
-    opencl_data: Arc<RwLock<Option<OpenCLTensor>>>,
-    #[cfg(feature = "opencl")]
-    waiting_for_data: Option<OpenCLEvent>, // Is OpenCL in process of sending data back to CPU?
-
     dtype: TensorDType,
     layout: Layout,
-    q4_layout: Layout,
     rows: i64,
     cols: i64,
     // Every matrix is allocated so that cols are rounded to the next multiple of 32.
@@ -116,18 +122,6 @@ unsafe impl Sync for Tensor {}
 
 impl Clone for Tensor {
     fn clone(&self) -> Self {
-        #[cfg(feature = "opencl")]
-        {
-            if let Some(ref wfd) = self.waiting_for_data {
-                wfd.wait();
-                let mut od = self.opencl_data.write().unwrap();
-                *od = None;
-            }
-            let od = self.opencl_data.read().unwrap();
-            if od.is_some() {
-                panic!("Tried to clone a tensor that is on the GPU");
-            }
-        }
         unsafe {
             let new_tensor = Tensor::uninitialized(self.rows, self.cols, self.dtype);
             std::ptr::copy_nonoverlapping(
@@ -136,13 +130,6 @@ impl Clone for Tensor {
                 (self.rows * self.dtype.bytes_for_nvalues(self.capacity_cols as usize) as i64)
                     as usize,
             );
-            if !self.q4_data.is_null() {
-                std::ptr::copy_nonoverlapping(
-                    self.q4_data,
-                    new_tensor.q4_data,
-                    self.q4_layout.size(),
-                );
-            }
             new_tensor
         }
     }
@@ -157,16 +144,11 @@ lazy_static! {
 
 impl Drop for Tensor {
     fn drop(&mut self) {
-        #[cfg(feature = "opencl")]
-        self.process_waiting_for_data_mut();
         unsafe {
             if !self.data.is_null() {
                 TENSORS_BYTES_ALLOCATED
                     .fetch_sub(self.layout.size(), std::sync::atomic::Ordering::Relaxed);
                 std::alloc::dealloc(self.data, self.layout);
-            }
-            if !self.q4_data.is_null() {
-                std::alloc::dealloc(self.q4_data, self.q4_layout);
             }
         }
     }
@@ -223,51 +205,9 @@ fn compute_capacity_cols_f16(cols: i64) -> i64 {
 
 impl Tensor {
     #[inline]
-    pub fn assume_on_gpu(&self) {
-        #[cfg(feature = "opencl")]
-        {
-            self.process_waiting_for_data();
-            let od = self.opencl_data.read().unwrap();
-            if !od.is_some() {
-                panic!("Tried to assume_on_gpu on a tensor that is on the CPU");
-            }
-        }
-    }
-
-    #[inline]
-    pub fn assume_on_cpu(&self) {
-        #[cfg(feature = "opencl")]
-        {
-            self.process_waiting_for_data();
-            let od = self.opencl_data.read().unwrap();
-            if od.is_some() {
-                panic!("Tried to assume_on_cpu on a tensor that is on the GPU");
-            }
-        }
-    }
-
-    #[inline]
     pub fn dtype(&self) -> TensorDType {
         self.dtype
     }
-
-    /*
-    pub fn from_unpickled<S: AsRef<str>>(
-        unpickled: &unpickler::Value,
-        name: S,
-        data_source: DataSource,
-    ) -> Result<Tensor, UnpicklingError> {
-        let name: &str = name.as_ref();
-        let val = unpickled
-            .get_str_key(name)
-            .ok_or(UnpicklingError::MissingField(name.to_string()))?;
-        let val = val
-            .to_tensor_builder()
-            .ok_or(UnpicklingError::InvalidTensorData)?;
-        let val = val.load(data_source)?;
-        Ok(val)
-    }
-    */
 
     pub fn from_unpickled_pieces<S: AsRef<str>>(
         name: S,
@@ -339,7 +279,6 @@ impl Tensor {
     // Gets a value as f32 from the tensor.
     #[inline]
     pub fn get_f32(&self, row: i64, col: i64) -> f32 {
-        self.assume_on_cpu();
         assert!(
             row >= 0 && col >= 0 && row < self.rows && col < self.cols,
             "Invalid index: {}, {} Size: {}, {}",
@@ -366,7 +305,6 @@ impl Tensor {
     // Sets a value from f32. The value is cast into whatever the tensor's dtype is.
     #[inline]
     pub fn set_f32(&mut self, row: i64, col: i64, val: f32) {
-        self.assume_on_cpu();
         let idx = row * self.capacity_cols + col;
         match self.dtype {
             TensorDType::K4BitQuantization => unimplemented!(),
@@ -383,7 +321,6 @@ impl Tensor {
     // Converts the tensor to two-dimensional Vec<f32>.
     // Meant for debugging and making it easy to print tensors.
     pub fn to_vec(&self) -> Vec<Vec<f32>> {
-        self.assume_on_cpu();
         let mut result = Vec::new();
         for row in 0..self.rows {
             let mut row_vec = Vec::new();
@@ -399,14 +336,8 @@ impl Tensor {
     pub fn empty() -> Self {
         Self {
             data: std::ptr::null_mut(),
-            q4_data: std::ptr::null_mut(),
-            #[cfg(feature = "opencl")]
-            opencl_data: Arc::new(RwLock::new(None)),
-            #[cfg(feature = "opencl")]
-            waiting_for_data: None,
             dtype: TensorDType::Float16,
             layout: Layout::from_size_align(1, 1).unwrap(),
-            q4_layout: Layout::from_size_align(1, 1).unwrap(),
             rows: 0,
             cols: 0,
             capacity_cols: 0,
@@ -451,17 +382,11 @@ impl Tensor {
 
         Self {
             data,
-            q4_data: std::ptr::null_mut(),
-            #[cfg(feature = "opencl")]
-            opencl_data: Arc::new(RwLock::new(None)),
-            #[cfg(feature = "opencl")]
-            waiting_for_data: None,
             dtype,
             rows,
             cols,
             capacity_cols,
             layout,
-            q4_layout: Layout::from_size_align(1, 1).unwrap(),
         }
     }
 
@@ -477,7 +402,6 @@ impl Tensor {
 
     // Runs softmax on row dimension.
     pub fn softmax(&self) -> Tensor {
-        self.assume_on_cpu();
         let mut result = unsafe { Tensor::uninitialized(self.rows, self.cols, self.dtype) };
         for row in 0..self.rows {
             let mut sum = 0.0;
@@ -509,7 +433,6 @@ impl Tensor {
 
     // Computes mean for each row, so that columns become 1.
     pub fn mean_cols(&self) -> Tensor {
-        self.assume_on_cpu();
         let mut result = unsafe { Tensor::uninitialized(self.rows, 1, self.dtype) };
         for row in 0..self.rows {
             let mut sum = 0.0;
@@ -522,7 +445,6 @@ impl Tensor {
     }
 
     pub fn mean(&self) -> Tensor {
-        self.assume_on_cpu();
         let mut result = unsafe { Tensor::uninitialized(1, 1, self.dtype) };
         let mut sum = 0.0;
         for row in 0..self.rows {
@@ -535,7 +457,6 @@ impl Tensor {
     }
 
     pub fn pow(&self, power: f32) -> Tensor {
-        self.assume_on_cpu();
         let mut result = unsafe { Tensor::uninitialized(self.rows, self.cols, self.dtype) };
         for row in 0..self.rows {
             for col in 0..self.cols {
@@ -547,7 +468,6 @@ impl Tensor {
     }
 
     pub fn sqrt(&self) -> Tensor {
-        self.assume_on_cpu();
         let mut result = unsafe { Tensor::uninitialized(self.rows, self.cols, self.dtype) };
         for row in 0..self.rows {
             for col in 0..self.cols {
@@ -559,7 +479,6 @@ impl Tensor {
     }
 
     pub fn rsqrt(&self) -> Tensor {
-        self.assume_on_cpu();
         let mut result = unsafe { Tensor::uninitialized(self.rows, self.cols, self.dtype) };
         for row in 0..self.rows {
             for col in 0..self.cols {
@@ -571,8 +490,6 @@ impl Tensor {
     }
 
     pub fn add(&self, other: &Tensor) -> Tensor {
-        self.assume_on_cpu();
-        other.assume_on_cpu();
         if self.rows() != other.rows() || self.cols() != other.cols() {
             panic!(
                 "add: Tensors must have the same shape, left: {}x{} right: {}x{}",
@@ -593,7 +510,6 @@ impl Tensor {
     }
 
     pub fn add_scalar(&self, scalar: f32) -> Tensor {
-        self.assume_on_cpu();
         let mut result = unsafe { Tensor::uninitialized(self.rows, self.cols, self.dtype) };
         for row in 0..self.rows {
             for col in 0..self.cols {
@@ -605,7 +521,6 @@ impl Tensor {
     }
 
     pub fn scalar_multiply_f32(&self, scalar: f32) -> Tensor {
-        self.assume_on_cpu();
         let mut result = unsafe { Tensor::uninitialized(self.rows, self.cols, self.dtype) };
         for row in 0..self.rows {
             for col in 0..self.cols {
@@ -617,7 +532,6 @@ impl Tensor {
     }
 
     pub fn scalar_multiply_broadcast(&self, other: &Tensor) -> Tensor {
-        self.assume_on_cpu();
         if other.cols != 1 {
             panic!("Invalid scalar broadcast");
         }
@@ -636,7 +550,6 @@ impl Tensor {
     }
 
     pub fn scalar_product(&self, other: &Tensor) -> Tensor {
-        self.assume_on_cpu();
         if other.cols != 1 || other.rows != 1 {
             panic!("Invalid scalar product");
         }
@@ -652,8 +565,6 @@ impl Tensor {
     }
 
     pub fn hadamard_product_broadcast(&self, other: &Tensor) -> Tensor {
-        self.assume_on_cpu();
-        other.assume_on_cpu();
         if self.cols != other.cols {
             panic!(
                 "Invalid hadamard product broadcast: {}x{} vs {}x{}",
@@ -683,26 +594,13 @@ impl Tensor {
                 self.rows, self.cols, other.rows, other.cols
             );
         }
-        #[cfg(feature = "opencl")]
-        {
-            if self.is_on_gpu() {
-                self.hadamard_product_gpu(other)
-            } else {
-                self.hadamard_product_cpu(other)
-            }
-        }
-        #[cfg(not(feature = "opencl"))]
-        {
-            self.hadamard_product_cpu(other)
-        }
+        self.hadamard_product_cpu(other)
+
     }
 
-    #[cfg(feature = "opencl")]
+   /* #[cfg(feature = "opencl")]
     fn hadamard_product_gpu(&self, other: &Tensor) -> Tensor {
         // Assume: sizes have been checked already
-        self.assume_on_gpu();
-        other.assume_on_gpu();
-
         self.with_opencl_data(|self_tensor| {
             let cl = self_tensor.cl();
             // TODO: do not create a CPU-side copy
@@ -717,12 +615,11 @@ impl Tensor {
             });
             result
         })
-    }
+    }*/
 
     fn hadamard_product_cpu(&self, other: &Tensor) -> Tensor {
         // Assume: sizes have been checked already
-        self.assume_on_cpu();
-        other.assume_on_cpu();
+
         let mut result = unsafe { Tensor::uninitialized(self.rows, self.cols, self.dtype) };
         for row in 0..self.rows {
             for col in 0..self.cols {
@@ -753,7 +650,6 @@ impl Tensor {
             unsafe { Tensor::uninitialized(total_rows, expected_cols, pieces[0].dtype) };
         let mut row_offset = 0;
         for piece in pieces {
-            piece.assume_on_cpu();
             for row in 0..piece.rows {
                 for col in 0..piece.cols {
                     let val = piece.get_f32(row, col);
@@ -766,23 +662,12 @@ impl Tensor {
     }
 
     pub fn silu(&self) -> Tensor {
-        #[cfg(feature = "opencl")]
-        {
-            if self.is_on_gpu() {
-                self.silu_gpu()
-            } else {
-                self.silu_cpu()
-            }
-        }
-        #[cfg(not(feature = "opencl"))]
-        {
-            self.silu_cpu()
-        }
+        self.silu_cpu()
     }
 
     // with_opencl_data & with_opencl_data_mut are utilities to get access to the underlying
     // OpenCLTensor, if the tensor is on gpu. Panics if they are not on GPU.
-    #[cfg(feature = "opencl")]
+    /*#[cfg(feature = "opencl")]
     fn with_opencl_data<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&OpenCLTensor) -> R,
@@ -817,7 +702,7 @@ impl Tensor {
             });
             result
         })
-    }
+    }*/
 
     fn silu_cpu(&self) -> Tensor {
         let mut result = unsafe { Tensor::uninitialized(self.rows, self.cols, self.dtype) };
@@ -909,21 +794,10 @@ impl Tensor {
     }
 
     pub fn transpose(&self) -> Tensor {
-        #[cfg(feature = "opencl")]
-        {
-            if self.is_on_gpu() {
-                self.transpose_gpu()
-            } else {
-                self.transpose_cpu()
-            }
-        }
-        #[cfg(not(feature = "opencl"))]
-        {
-            self.transpose_cpu()
-        }
+        self.transpose_cpu()
     }
 
-    #[cfg(feature = "opencl")]
+/*    #[cfg(feature = "opencl")]
     fn transpose_gpu(&self) -> Tensor {
         self.assume_on_gpu();
         self.with_opencl_data(|src_tensor| {
@@ -937,10 +811,9 @@ impl Tensor {
             });
             result
         })
-    }
+    }*/
 
     fn transpose_cpu(&self) -> Tensor {
-        self.assume_on_cpu();
         let mut result = unsafe { Tensor::uninitialized(self.cols, self.rows, self.dtype) };
         for row in 0..self.rows {
             for col in 0..self.cols {
@@ -955,8 +828,6 @@ impl Tensor {
     ///
     /// This is used as a reference to test correctness of other matrix multiplications.
     pub fn matrix_mul_naive(&self, other: &Tensor) -> Tensor {
-        self.assume_on_cpu();
-        other.assume_on_cpu();
         if self.cols != other.rows {
             panic!(
                 "Invalid matrix multiplication {}x{} vs {}x{}",
@@ -977,8 +848,6 @@ impl Tensor {
     }
 
     pub fn matrix_mul(&self, other: &Tensor) -> Tensor {
-        self.assume_on_cpu();
-        other.assume_on_cpu();
         if self.cols != other.rows {
             panic!(
                 "Invalid matrix multiplication {}x{} vs {}x{}",
@@ -1005,20 +874,20 @@ impl Tensor {
         }
         // We don't have implementation for f16, so don't use the vector function if we have
         // f16
-        #[cfg(not(feature = "opencl"))]
+        /*#[cfg(not(feature = "opencl"))]
         if other.rows == 1 && other.dtype != TensorDType::Float16 {
             return self.matrix_vector_mul_transposed(other);
         }
         #[cfg(feature = "opencl")]
         if other.rows == 1 && self.is_on_cpu() {
             return self.matrix_vector_mul_transposed(other);
-        }
+        }*/
         let mut result = unsafe { Tensor::uninitialized(self.rows, other.rows, self.dtype) };
-        #[cfg(feature = "opencl")]
+        /*#[cfg(feature = "opencl")]
         if self.is_on_gpu() {
             let od = self.opencl_data.write().unwrap();
             result.to_gpu_inplace(&od.as_ref().unwrap().cl()).unwrap();
-        }
+        }*/
 
         result.matrix_mul_inplace_transposed(self, other);
         result
@@ -1026,9 +895,6 @@ impl Tensor {
 
     /// Matrix multiplication done in-place
     pub fn matrix_mul_inplace(&mut self, src: &Tensor, other: &Tensor) {
-        self.assume_on_cpu();
-        src.assume_on_cpu();
-        other.assume_on_cpu();
         if src.cols != other.rows {
             panic!(
                 "Invalid matrix multiplication {}x{} vs {}x{}",
@@ -1173,7 +1039,7 @@ impl Tensor {
         }
     }
 
-    #[cfg(feature = "opencl")]
+    /*#[cfg(feature = "opencl")]
     pub fn is_on_gpu(&self) -> bool {
         if self.waiting_for_data.is_some() {
             return false;
@@ -1192,7 +1058,7 @@ impl Tensor {
 
     pub fn is_on_cpu(&self) -> bool {
         !self.is_on_gpu()
-    }
+    }*/
 
     // Casts data type to whatever the other tensors data type is.
     pub fn to_same_type(&self, other: &Tensor) -> Tensor {
@@ -1226,7 +1092,7 @@ impl Tensor {
         }
     }
 
-    #[cfg(feature = "opencl")]
+    /*#[cfg(feature = "opencl")]
     fn matrix_mul_inplace_transposed_gpu(&mut self, src: &Tensor, other: &Tensor) {
         let mut self_od = self.opencl_data.write().unwrap();
         let src_od = src.opencl_data.read().unwrap();
@@ -1243,21 +1109,18 @@ impl Tensor {
         std::mem::drop(self_od);
         std::mem::drop(src_od);
         std::mem::drop(other_od);
-    }
+    }*/
 
     /// Matrix multiplication done in-place, but the second matrix is transposed.
     /// With this, you can avoid using .transpose() on the second matrix.
     pub fn matrix_mul_inplace_transposed(&mut self, src: &Tensor, other: &Tensor) {
         let nthreads: usize = rayon::current_num_threads();
 
-        #[cfg(feature = "opencl")]
+        /*#[cfg(feature = "opencl")]
         if self.is_on_gpu() && src.is_on_gpu() && other.is_on_gpu() {
             self.matrix_mul_inplace_transposed_gpu(src, other);
             return;
-        }
-        self.assume_on_cpu();
-        src.assume_on_cpu();
-        other.assume_on_cpu();
+        }*/
         if src.cols != other.cols {
             panic!(
                 "Invalid matrix multiplication {}x{} vs {}x{}",
@@ -1671,8 +1534,6 @@ impl Tensor {
     //
     // AxB @ Cx1 = Ax1
     pub fn matrix_vector_mul(&self, other: &Tensor) -> Tensor {
-        self.assume_on_cpu();
-        other.assume_on_cpu();
         // TODO: this function is not optimized.
         if self.cols != other.rows {
             panic!(
@@ -1697,8 +1558,6 @@ impl Tensor {
 
     /// Same as matrix_vector_mul, but right side is assumed to be transposed.
     pub fn matrix_vector_mul_transposed(&self, other: &Tensor) -> Tensor {
-        self.assume_on_cpu();
-        other.assume_on_cpu();
         if self.cols != other.cols {
             panic!(
                 "Invalid matrix-vector transposed multiplication {}x{} vs {}x{}",
@@ -1717,8 +1576,6 @@ impl Tensor {
     }
 
     fn matrix_vector_mul_transposed_f16(&self, other: &Tensor) -> Tensor {
-        self.assume_on_cpu();
-        other.assume_on_cpu();
         unsafe {
             let mut result = Tensor::uninitialized(self.rows, 1, self.dtype);
             let col_its: usize = if self.cols % 16 == 0 {
@@ -1835,8 +1692,6 @@ impl Tensor {
     }
 
     fn matrix_vector_mul_transposed_f32(&self, other: &Tensor) -> Tensor {
-        self.assume_on_cpu();
-        other.assume_on_cpu();
         unsafe {
             let result = Tensor::zeros(self.rows, 1, self.dtype);
             let col_its: usize = if self.cols % 8 == 0 {
@@ -1921,8 +1776,6 @@ impl Tensor {
     #[allow(clippy::erasing_op)]
     #[allow(clippy::identity_op)]
     pub fn vector_matrix_mul(&self, other: &Tensor) -> Tensor {
-        self.assume_on_cpu();
-        other.assume_on_cpu();
         if self.cols != other.rows {
             panic!(
                 "Invalid matrix-vector multiplication {}x{} vs {}x{}",
@@ -2020,22 +1873,15 @@ impl Tensor {
         TENSORS_BYTES_ALLOCATED.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
         Self {
             data,
-            q4_data: std::ptr::null_mut(),
-            #[cfg(feature = "opencl")]
-            opencl_data: Arc::new(RwLock::new(None)),
-            #[cfg(feature = "opencl")]
-            waiting_for_data: None,
             dtype,
             rows,
             cols,
             capacity_cols,
             layout,
-            q4_layout: Layout::from_size_align(1, 1).unwrap(),
         }
     }
 
     pub fn clip_cols(&self, cols: usize) -> Tensor {
-        self.assume_on_cpu();
         if cols == 0 {
             return Self::empty();
         }
@@ -2061,7 +1907,6 @@ impl Tensor {
     }
 
     pub fn view(&self, rows: i64, cols: i64) -> Tensor {
-        self.assume_on_cpu();
         if rows * cols != self.rows * self.cols {
             panic!(
                 "Invalid tensor view, requested {}x{} but tensor is {}x{}",
@@ -2123,7 +1968,7 @@ impl Tensor {
     /// Sends a tensor to the GPU. This is a no-op if the tensor is already on the GPU.
     ///
     /// The tensor is moved asynchronously.
-    #[cfg(feature = "opencl")]
+    /*#[cfg(feature = "opencl")]
     pub fn to_gpu_inplace(&mut self, cl: &OpenCL) -> Result<(), TensorError> {
         self.process_waiting_for_data_mut();
         let mut od = self.opencl_data.write().unwrap();
@@ -2149,7 +1994,7 @@ impl Tensor {
     #[cfg(feature = "opencl")]
     fn process_waiting_for_data_mut(&mut self) {
         if let Some(ref wfd) = self.waiting_for_data {
-            wfd.wait();
+            wfd.as_ref().wait_for().unwrap();
             let mut od = self.opencl_data.write().unwrap();
             *od = None;
         }
@@ -2159,7 +2004,7 @@ impl Tensor {
     #[cfg(feature = "opencl")]
     fn process_waiting_for_data(&self) {
         if let Some(ref wfd) = self.waiting_for_data {
-            wfd.wait();
+            wfd.as_ref().wait_for().unwrap();
             let mut od = self.opencl_data.write().unwrap();
             *od = None;
         }
@@ -2203,11 +2048,10 @@ impl Tensor {
             panic!("wait_until_on_gpu: Tensor is not on GPU");
         }
         od.as_mut().unwrap().wait_until_ready();
-    }
+    }*/
 
     /// Naive implementation of to_f32, used for testing that the faster methods are correct.
     pub fn to_f32_naive(&self) -> Tensor {
-        self.assume_on_cpu();
         if self.dtype == TensorDType::Float32 {
             return self.clone();
         }
@@ -2224,7 +2068,6 @@ impl Tensor {
     }
 
     pub fn to_f32(&self) -> Tensor {
-        self.assume_on_cpu();
         if self.dtype == TensorDType::Float32 {
             return self.clone();
         }
@@ -2262,7 +2105,6 @@ impl Tensor {
 
     /// Naive implementation of to_f16, used for testing that the faster methods are correct.
     pub fn to_f16_naive(&self) -> Tensor {
-        self.assume_on_cpu();
         if self.dtype == TensorDType::Float16 {
             return self.clone();
         }
@@ -2279,7 +2121,6 @@ impl Tensor {
     }
 
     pub fn to_f16(&self) -> Tensor {
-        self.assume_on_cpu();
         if self.dtype == TensorDType::Float16 {
             return self.clone();
         }
@@ -2314,7 +2155,6 @@ impl Tensor {
     }
 
     pub fn row(&self, row: i64) -> Tensor {
-        self.assume_on_cpu();
         if row < 0 || row > self.rows {
             panic!("Invalid row index");
         }

@@ -7,7 +7,7 @@ use ocl::{
     Platform, Program, Queue,
 };
 use std::alloc::Layout;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 #[derive(Debug)]
@@ -32,7 +32,7 @@ struct Programs {
 pub struct OpenCL {
     ctx: Context,
     queue: Queue,
-    programs: Arc<RwLock<Programs>>,
+    programs: Arc<Mutex<Programs>>,
     is_cpu_device: bool,
 }
 
@@ -51,10 +51,11 @@ pub struct OpenCLTensor {
     cl: OpenCL,
 }
 
-#[derive(Debug)]
-pub struct OpenCLEvent {
+//#[derive(Debug)]
+pub type OpenCLEvent = ocl::Event;
+/*pub struct OpenCLEvent {
     event: ocl::Event,
-}
+}*/
 
 impl Drop for OpenCLTensor {
     fn drop(&mut self) {
@@ -73,6 +74,8 @@ impl Drop for OpenCLTensor {
         }
     }
 }
+unsafe impl Send for OpenCLTensor {}
+unsafe impl Sync for OpenCLTensor {}
 
 #[derive(Error, Debug)]
 pub enum OpenCLError {
@@ -122,7 +125,7 @@ impl OpenCL {
         Ok(OpenCL {
             ctx: ctx,
             queue: queue,
-            programs: Arc::new(RwLock::new(programs)),
+            programs: Arc::new(Mutex::new(programs)),
             is_cpu_device,
         })
     }
@@ -207,7 +210,7 @@ impl OpenCLTensor {
                 .enew(&mut event);
             b.enq()?;
             self.last_event = Some(event.clone());
-            return Ok(OpenCLEvent { event });
+            return Ok(event.clone());
         }
     }
 
@@ -228,11 +231,11 @@ impl OpenCLTensor {
             .enew(&mut event)
             .enq()?;
         self.last_event = Some(event.clone());
-        Ok(OpenCLEvent { event })
+        Ok(event.clone())
     }
 
     pub fn transpose_from(&mut self, other: &OpenCLTensor) -> Result<OpenCLEvent, OpenCLError> {
-        let prg = self.cl.programs.write().unwrap();
+        let prg = self.cl.programs.lock().unwrap();
         prg.transpose_f16.set_arg(0, self.buf.clone()).unwrap();
         prg.transpose_f16.set_arg(1, other.buf.clone()).unwrap();
         prg.transpose_f16
@@ -252,14 +255,14 @@ impl OpenCLTensor {
             b.enq().unwrap();
         }
         self.last_event = Some(event.clone());
-        Ok(OpenCLEvent { event })
+        Ok(event.clone())
     }
 
     pub fn hadamard_product_inplace(
         &mut self,
         other: &OpenCLTensor,
     ) -> Result<OpenCLEvent, OpenCLError> {
-        let prg = self.cl.programs.write().unwrap();
+        let prg = self.cl.programs.lock().unwrap();
         prg.hadamard_product_f16.set_arg(0, self.buf.clone())?;
         prg.hadamard_product_f16.set_arg(1, other.buf.clone())?;
         prg.hadamard_product_f16
@@ -277,11 +280,11 @@ impl OpenCLTensor {
             b.enq()?;
         }
         self.last_event = Some(event.clone());
-        Ok(OpenCLEvent { event })
+        Ok(event.clone())
     }
 
     pub fn silu_inplace(&mut self) -> Result<OpenCLEvent, OpenCLError> {
-        let prg = self.cl.programs.write().unwrap();
+        let prg = self.cl.programs.lock().unwrap();
         prg.silu_f16.set_arg(0, self.buf.clone())?;
         prg.silu_f16.set_arg(1, self.cols_capacity as i32)?;
         let mut event = Event::empty();
@@ -295,7 +298,7 @@ impl OpenCLTensor {
             b.enq()?;
         }
         self.last_event = Some(event.clone());
-        Ok(OpenCLEvent { event })
+        Ok(event.clone())
     }
 
     pub fn matrix_mul_inplace_transposed(
@@ -319,7 +322,7 @@ impl OpenCLTensor {
         // Clear out the target memory.
         unsafe { self.buf.cmd().fill(0u16, None).block(false).enq()? };
 
-        let prg = self.cl.programs.write().unwrap();
+        let prg = self.cl.programs.lock().unwrap();
 
         // 0 = CPU optimized
         // 1 = GPU optimized
@@ -400,16 +403,16 @@ impl OpenCLTensor {
             }
         }
         self.last_event = Some(event.clone());
-        Ok(OpenCLEvent { event })
+        Ok(event.clone())
     }
 }
 
-impl OpenCLEvent {
+/*impl OpenCLEvent {
     #[inline]
     pub fn wait(&self) {
         self.event.wait_for().unwrap();
     }
-}
+}*/
 
 fn make_programs(ctx: &Context, queue: &Queue) -> Result<Programs, OpenCLError> {
     fn make_program_with_src(ctx: &Context, src: &str) -> Result<Program, OpenCLError> {
