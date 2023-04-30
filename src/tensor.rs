@@ -58,10 +58,13 @@ pub enum TensorDType {
 #[derive(Debug)]
 #[derive(Clone)]
 pub struct Moving {
-    opencl_data: Arc<RwLock<Option<OpenCLTensor>>>,
-    waiting_for_data: Option<OpenCLEvent>
+    tensor: Tensor,
+    opencltensor: OpenCLTensor,
+    moving: OpenCLEvent,
 }
-
+//impl Moving {
+//    pub fn get_opencl
+//}
 
 #[derive(Debug)]
 pub enum Movable {
@@ -83,12 +86,12 @@ impl Movable {
             Movable::Moving(_) => unimplemented!(),
         }
     }
-    pub fn to_f32(&self) -> Movable {
+    pub fn to_f32(&mut self) -> Movable {
         match &self {
             Movable::CPU(t) => Movable::CPU(t.to_f32()),
             //TODO
             #[cfg(feature = "opencl")]
-            Movable::GPU(_) => unimplemented!(),
+            Movable::GPU(_) => self.sync_move_to_cpu().to_f32(),
             #[cfg(feature = "opencl")]
             Movable::Moving(_) => unimplemented!(),
         }
@@ -97,11 +100,10 @@ impl Movable {
     pub fn dtype(&self) -> TensorDType {
         match &self {
             Movable::CPU(t) => t.dtype,
-                        //TODO
             #[cfg(feature = "opencl")]
-            Movable::GPU(_) => unimplemented!(),
+            Movable::GPU(_) => TensorDType::Float16,
             #[cfg(feature = "opencl")]
-            Movable::Moving(_) => unimplemented!(),
+            Movable::Moving(_) => TensorDType::Float16,
         }
     }
     
@@ -112,16 +114,39 @@ impl Movable {
             //TODO
             (Movable::CPU(s),_) => unimplemented!(),
             #[cfg(feature = "opencl")]
+            (Movable::GPU(s), Movable::GPU(o)) => {
+                let mut out = s.cl().uninitialized(s.rows(), o.rows());
+                match &mut out {
+                    Ok(res) => match res.matrix_mul_inplace_transposed(s,o) {
+                        Ok(_) => Movable::GPU(res.clone()),
+                        Err(_) => panic!("unable to do matrix_mul_inplace_transposed on GPUxGPU")
+                    }
+                    Err(_) => panic!("unable to initi on GPU")
+                }
+            },
+            #[cfg(feature = "opencl")] //move to cpu or to gpu ?
+            (Movable::GPU(g), Movable::CPU(o)) => {
+                if o.cols == 0 || o.rows == 0 {
+                    //panic!("gpu unable to buffer 0 len");
+                }
+                self.matrix_mul_transposed_(&other.sync_move_to_gpu(&g.cl()))
+            }
+            #[cfg(feature = "opencl")]
             (Movable::GPU(_), _) => unimplemented!(),
+
             #[cfg(feature = "opencl")]
             (Movable::Moving(_), _) => unimplemented!(),
         }
     }
-    pub fn into_dtype_(self, dtype: TensorDType) -> Movable {
+    pub fn into_dtype_(&mut self, dtype: TensorDType) -> Movable {
         match &self {
             Movable::CPU(t) => Movable::CPU(t.clone().into_dtype(dtype)),
             #[cfg(feature = "opencl")]
-            Movable::GPU(_) => unimplemented!(),
+            Movable::GPU(g) => match dtype {
+                TensorDType::K4BitQuantization => unimplemented!(),
+                TensorDType::Float16 => Movable::GPU(g.clone()),
+                TensorDType::Float32 => self.sync_move_to_cpu().into_dtype_(dtype)
+            },
             #[cfg(feature = "opencl")]
             Movable::Moving(_) => unimplemented!(),
         }
@@ -170,11 +195,160 @@ impl Movable {
          match (&self, other) {
             (Movable::CPU(s),Movable::CPU(o)) => Movable::CPU(s.to_same_type(o)),
             //TODO
+            #[cfg(feature = "opencl")]
+            (Movable::CPU(s),Movable::GPU(o)) => self.to_f16().sync_move_to_gpu(&o.cl()),
             (Movable::CPU(s),_) => unimplemented!(),
             #[cfg(feature = "opencl")]
             (Movable::GPU(_), _) => unimplemented!(),
             #[cfg(feature = "opencl")]
             (Movable::Moving(_), _) => unimplemented!(),
+        }
+     }
+         #[inline]
+     pub fn sync_move_to_gpu(&self, cl: &OpenCL) -> Movable {
+        match self {
+             Movable::CPU(t) => {
+                 if t.dtype != TensorDType::Float16 {
+                    panic!("to_gpu_inplace: Only float16 tensors are supported on the GPU");
+                 }
+                 if let Ok(cl_tensor) = cl.data_u16_to_gpu(
+                    t.data as *const u16,
+                    t.layout,
+                    (t.rows * t.capacity_cols) as usize,
+                    t.rows,
+                    t.cols,
+                    t.capacity_cols,
+                    )
+                {
+                    if let Some(ev) = cl_tensor.current_event() {
+                        ev.wait_for();
+                        return  Movable::GPU(cl_tensor);
+                    }
+                }
+                //fail
+                    Movable::CPU(t.clone())
+             },
+            #[cfg(feature = "opencl")]
+            Movable::GPU(g) => Movable::GPU(g.clone()),
+            #[cfg(feature = "opencl")]
+            Movable::Moving(_) => unimplemented!(),
+        }
+     }
+     pub fn move_to_gpu(&mut self, cl: &OpenCL) -> Movable {
+         match self {
+             Movable::CPU(t) => {
+                 println!("called async move, care form data pointer");
+                 if t.dtype != TensorDType::Float16 {
+                    panic!("to_gpu_inplace: Only float16 tensors are supported on the GPU");
+                 }
+                 if let Ok(cl_tensor) = cl.data_u16_to_gpu(
+                    t.data as *const u16,
+                    t.layout,
+                    (t.rows * t.capacity_cols) as usize,
+                    t.rows,
+                    t.cols,
+                    t.capacity_cols,
+                    )
+                { 
+                    if let Some(ev) = cl_tensor.current_event() {
+                        return  Movable::Moving(Moving { tensor: t.clone(), opencltensor: cl_tensor, moving: ev})
+                    }
+                }
+                //fail
+                    Movable::CPU(t.clone())
+             },
+            #[cfg(feature = "opencl")]
+            Movable::GPU(g) => Movable::GPU(g.clone()),
+            #[cfg(feature = "opencl")]
+            Movable::Moving(ref mut m) => {
+                if m.moving.is_complete().unwrap_or(false)  {
+                    return Movable::GPU(m.opencltensor.clone())
+                }
+                else {
+                    return Movable::Moving(m.clone())
+                }
+            },
+        }
+    }
+    pub fn wait_for(&self) {
+        match &self {
+             Movable::CPU(_) => (),
+            #[cfg(feature = "opencl")]
+             Movable::GPU(_) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            Movable::Moving(m) => match m.moving.wait_for() {
+                Err(_) => (),
+                Ok(_) => (),
+            },
+        }
+    }
+        #[inline]
+    pub fn sync_move_to_cpu(&mut self) -> Movable {
+        match self {
+            Movable::CPU(t) => Movable::CPU(t.clone()),
+            #[cfg(feature = "opencl")]
+            Movable::GPU(g) => {
+                unsafe {
+                    let mut t : Tensor = Tensor::uninitialized(g.rows(), g.cols(), TensorDType::Float16);
+                    let data = unsafe { std::alloc::alloc(g.layout()) };
+                    if data.is_null() {
+                        panic!("to_cpu_inplace: Failed to allocate tensor");
+                    }
+                    TENSORS_BYTES_ALLOCATED.fetch_add(g.layout().size(), std::sync::atomic::Ordering::Relaxed);
+                
+                    if let Ok(ev) = g.data_u16_from_gpu(data as *mut u16) {
+                        t.data = data as *mut u16 as *mut u8;
+                        ev.wait_for();
+                        Movable::CPU(t.clone())
+                    }
+                    else {
+                        Movable::GPU(g.clone())
+                    }
+                }
+
+            },
+            #[cfg(feature = "opencl")]
+            Movable::Moving(m) => {
+                if m.moving.is_complete().unwrap_or(false) {
+                    return Movable::CPU(m.tensor.clone())
+                }
+                else {
+                    return Movable::Moving(m.clone())
+                }
+            },
+        }
+     }
+    pub fn move_to_cpu(&mut self) -> Movable {
+        match self {
+            Movable::CPU(t) => Movable::CPU(t.clone()),
+            #[cfg(feature = "opencl")]
+            Movable::GPU(g) => {
+                unsafe {
+                    let mut t : Tensor = Tensor::uninitialized(g.rows(), g.cols(), TensorDType::Float16);
+                    let data = unsafe { std::alloc::alloc(g.layout()) };
+                    if data.is_null() {
+                        panic!("to_cpu_inplace: Failed to allocate tensor");
+                    }
+                    TENSORS_BYTES_ALLOCATED.fetch_add(g.layout().size(), std::sync::atomic::Ordering::Relaxed);
+                    if let Ok(ev) = g.data_u16_from_gpu(data as *mut u16) {
+                        t.data = data as *mut u16 as *mut u8;
+                        Movable::Moving(Moving { tensor: t.clone(), opencltensor: g.clone() ,moving: ev})
+                    }
+                    else {
+                        Movable::GPU(g.clone())
+                    }
+                }
+
+            },
+            #[cfg(feature = "opencl")]
+            Movable::Moving(m) => {
+                if m.moving.is_complete().unwrap_or(false) {
+                    return Movable::CPU(m.tensor.clone())
+                }
+                else {
+                    return Movable::Moving(m.clone())
+                }
+            },
         }
      }
 }
@@ -855,7 +1029,6 @@ impl Tensor {
             d1_src * d2_src * d3_src * d4_src,
             (self.rows * self.cols) as usize
         );
-
         fn cursors_to_offset(
             d1: usize,
             d2: usize,
@@ -886,7 +1059,7 @@ impl Tensor {
             let d4_cursor = offset % d4;
             (d1_cursor, d2_cursor, d3_cursor, d4_cursor)
         }
-
+        
         let mut result = Tensor::zeros(self.rows(), self.cols(), self.dtype());
         for row in 0..self.rows() {
             for col in 0..self.cols() {
@@ -899,7 +1072,9 @@ impl Tensor {
                 let dst_row = dst_offset / result.cols() as usize;
                 let dst_col = dst_offset % result.cols() as usize;
                 result.set_f32(dst_row as i64, dst_col as i64, src_v);
+               
             }
+             
         }
         result
     }

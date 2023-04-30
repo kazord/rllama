@@ -401,18 +401,21 @@ impl TransformerBlock {
             data_settings,
             data_source.clone(),
         )?;
+
         let ffn_norm = RMSNorm::from_unpickled(
             format!("layers.{}.ffn_norm.weight", layer_id),
             format!("model.layers.{}.post_attention_layernorm.weight", layer_id),
             eps,
             data_source.clone(),
         )?;
+
         let attn_norm = RMSNorm::from_unpickled(
             format!("layers.{}.attention_norm.weight", layer_id),
             format!("model.layers.{}.input_layernorm.weight", layer_id),
             eps,
             data_source,
         )?;
+        
         Ok(Self {
             feed_forward: ff,
             attn,
@@ -511,19 +514,19 @@ impl FeedForward {
             w3 = w3.to_f16();
         }
 
-       /* TODO
+       // TODO
        #[cfg(feature = "opencl")]
         {
             if data_settings.use_opencl_for_feedforward {
-                w1 = w1.to_f16();
-                w2 = w2.to_f16();
-                w3 = w3.to_f16();
                 let ds = data_settings.clone();
-                w1.to_gpu_inplace(&ds.cl.as_ref().unwrap().clone()).unwrap();
-                w2.to_gpu_inplace(&ds.cl.as_ref().unwrap().clone()).unwrap();
-                w3.to_gpu_inplace(&ds.cl.unwrap()).unwrap();
+                if let Some(cl) = &ds.cl
+                {
+                    w1 = w1.to_f16().sync_move_to_gpu(cl);
+                    w2 = w2.to_f16().sync_move_to_gpu(cl);
+                    w3 = w3.to_f16().sync_move_to_gpu(cl);
+                }
             }
-        }*/
+        }
         // w1, w2, w3 maybe be f32 or f16 depending on source data.
 
         Ok(Self {
@@ -620,19 +623,23 @@ impl Attention {
             data_source.clone(),
             FromPiecesDirection::Cols,
         )?;
-
+        
         if data_source.need_to_do_antitranspose() {
+            //needed cause huggingface_llama_model_antitranspose is accessing the same data as previosly memory transfer buffers started
+            /*if let Some(cl) = data_settings.clone().cl {
+                cl.flush();
+                cl.finish();
+            }*/
             wq = wq.huggingface_llama_model_antitranspose(n_local_heads, dim);
             wk = wk.huggingface_llama_model_antitranspose(n_local_heads, dim);
         }
-
         if data_settings.force_f16 {
-            wq = wq.to_f16();
+           wq = wq.to_f16();
             wk = wk.to_f16();
             wv = wv.to_f16();
             wo = wo.to_f16();
         }
-
+        
         /* TODO#[cfg(feature = "opencl")]
         {
             if data_settings.use_opencl_for_attention {
@@ -647,7 +654,7 @@ impl Attention {
                 wo.to_gpu_inplace(&ds.cl.unwrap()).unwrap();
             }
         }*/
-
+        
         Ok(Self {
             wq,
             wk,

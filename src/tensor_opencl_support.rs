@@ -37,6 +37,7 @@ pub struct OpenCL {
 }
 
 #[derive(Debug)]
+#[derive(Clone)]
 pub struct OpenCLTensor {
     buf: Buffer<u16>, // really is f16
     initial_write_event: Option<ocl::Event>,
@@ -133,6 +134,9 @@ impl OpenCL {
     pub fn flush(&self) {
         let _ = self.queue.flush();
     }
+    pub fn finish(&self) {
+        self.queue.finish();
+    }
 
     pub fn data_u16_to_gpu(
         &self,
@@ -170,13 +174,70 @@ impl OpenCL {
             })
         }
     }
+    pub fn uninitialized(&self, 
+        rows: i64,
+        cols: i64,
+    ) -> Result<OpenCLTensor, OpenCLError> {
+        unsafe {
+            let cols_capacity = if cols % 8 == 0 { cols } else { cols + 8 - cols % 8 };
+            let nitems : usize = rows as usize*cols_capacity as usize;
+            let data_layout = Layout::from_size_align(nitems * 2, 32).unwrap();
+            let buf = Buffer::builder()
+                .queue(self.queue.clone())
+                .len(nitems)
+                .build()?;
+            Ok(OpenCLTensor {
+                buf,
+                initial_write_event: None,
+                last_event: None,
+                data: std::ptr::null_mut(),
+                data_layout: data_layout,
+                nitems,
+                rows,
+                cols,
+                cols_capacity,
+                queue: self.queue.clone(),
+                cl: self.clone(),
+            })
+        }
+    }
 }
 
 impl OpenCLTensor {
     pub fn cl(&self) -> OpenCL {
         self.cl.clone()
     }
-
+    pub fn layout(&self) -> Layout {
+        self.data_layout.clone()
+    }
+    pub fn rows(&self) -> i64 {
+        self.rows
+    }
+    pub fn cols(&self) -> i64 {
+        self.cols
+    }
+    pub fn current_event(&self) -> Option<OpenCLEvent> {
+        if let Some(e) = &self.initial_write_event {
+            return Some(e.clone());
+        }
+        else if let Some(e) = &self.last_event {
+            return Some(e.clone());
+        }
+        return None;
+    }
+    pub fn is_ready(&self) -> bool {
+        if self.initial_write_event.is_some() {
+            if let Ok(b) = self.initial_write_event.as_ref().unwrap().is_complete() {
+                b
+            }
+            else {
+                false
+            }
+        }
+        else {
+            true
+        }
+    }
     pub fn wait_until_ready(&mut self) {
         if self.last_event.is_some() {
             self.last_event.as_ref().unwrap().wait_for().unwrap();

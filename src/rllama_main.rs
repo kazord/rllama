@@ -186,7 +186,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     #[cfg(feature = "opencl")]
-    let opencl: Option<OpenCL> = None /*{
+    let opencl: Option<OpenCL> = {
         let opencl_device = cli.opencl_device.unwrap_or(0);
         match OpenCL::new(!be_quiet, opencl_device) {
             Err(openclerr) => {
@@ -199,7 +199,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(opencl)
             }
         }
-    }*/;
+    };
 
     #[cfg(feature = "opencl")]
     let has_opencl = opencl.is_some();
@@ -961,6 +961,7 @@ fn command_line_inference(
             "Time taken to generate first token: {:?}ms",
             first_token_time.as_millis()
         );
+        println!("{} token generated",times_per_token.len());
         if times_per_token.len() > 0 {
             println!(
                 "Time taken per token (excluding first token): {:?}ms",
