@@ -220,10 +220,10 @@ pub struct RMSNorm {
 
 #[allow(dead_code)]
 pub struct Attention {
-    wq: Tensor,
-    wk: Tensor,
-    wv: Tensor,
-    wo: Tensor,
+    wq: Movable,
+    wk: Movable,
+    wv: Movable,
+    wo: Movable,
     n_local_heads: usize,
     head_dim: usize,
     data_settings: DataSettings,
@@ -266,10 +266,11 @@ impl Transformer {
                         let last_layer_on_gpu = (data_settings.percentage_to_gpu
                             * (max_layers - 1) as f32)
                             .round() as usize;
-                        if layer_id > last_layer_on_gpu {
-                            data_settings.clone().dont_use_opencl()
-                        } else {
+                        let modulator = if data_settings.percentage_to_gpu == 0.0 { 1 } else { (1.0/data_settings.percentage_to_gpu).floor() as usize};
+                        if layer_id % modulator == 0 && layer_id < last_layer_on_gpu*modulator{
                             data_settings.clone()
+                        } else {
+                            data_settings.clone().dont_use_opencl()
                         }
                     }
                     #[cfg(not(feature = "opencl"))]
@@ -550,8 +551,6 @@ impl FeedForward {
         { //TODO
             //x_was_on_cpu = x.is_on_cpu();
             if self.data_settings.use_opencl_for_feedforward {
-                //x.to_gpu_inplace(self.data_settings.cl.as_ref().unwrap())
-                    //.unwrap();
                 if let Some(cl) = &self.data_settings.cl {
                  x = x.sync_move_to_gpu(&cl);
                 }
@@ -602,25 +601,25 @@ impl Attention {
         data_settings: DataSettings,
         data_source: DataSource,
     ) -> Result<Attention, UnpicklingError> {
-        let mut wq = Tensor::from_unpickled_pieces2(
+        let mut twq = Tensor::from_unpickled_pieces2(
             format!("layers.{}.attention.wq.weight", layer_id),
             format!("model.layers.{}.self_attn.q_proj.weight", layer_id),
             data_source.clone(),
             FromPiecesDirection::Rows,
         )?;
-        let mut wk = Tensor::from_unpickled_pieces2(
+        let mut twk = Tensor::from_unpickled_pieces2(
             format!("layers.{}.attention.wk.weight", layer_id),
             format!("model.layers.{}.self_attn.k_proj.weight", layer_id),
             data_source.clone(),
             FromPiecesDirection::Rows,
         )?;
-        let mut wv = Tensor::from_unpickled_pieces2(
+        let mut twv = Tensor::from_unpickled_pieces2(
             format!("layers.{}.attention.wv.weight", layer_id),
             format!("model.layers.{}.self_attn.v_proj.weight", layer_id),
             data_source.clone(),
             FromPiecesDirection::Rows,
         )?;
-        let mut wo = Tensor::from_unpickled_pieces2(
+        let mut two = Tensor::from_unpickled_pieces2(
             format!("layers.{}.attention.wo.weight", layer_id),
             format!("model.layers.{}.self_attn.o_proj.weight", layer_id),
             data_source.clone(),
@@ -633,30 +632,33 @@ impl Attention {
                 cl.flush();
                 cl.finish();
             }*/
-            wq = wq.huggingface_llama_model_antitranspose(n_local_heads, dim);
-            wk = wk.huggingface_llama_model_antitranspose(n_local_heads, dim);
+            twq = twq.huggingface_llama_model_antitranspose(n_local_heads, dim);
+            twk = twk.huggingface_llama_model_antitranspose(n_local_heads, dim);
         }
         if data_settings.force_f16 {
-           wq = wq.to_f16();
-            wk = wk.to_f16();
-            wv = wv.to_f16();
-            wo = wo.to_f16();
+           twq = twq.to_f16();
+            twk = twk.to_f16();
+            twv = twv.to_f16();
+            two = two.to_f16();
         }
-        
-        /* TODO#[cfg(feature = "opencl")]
+        let mut wq = Movable::CPU(twq);
+        let mut wk = Movable::CPU(twk);
+        let mut wv = Movable::CPU(twv);
+        let mut wo = Movable::CPU(two);
+        // TODO
+        #[cfg(feature = "opencl")]
         {
             if data_settings.use_opencl_for_attention {
-                wq = wq.to_f16();
-                wk = wk.to_f16();
-                wv = wv.to_f16();
-                wo = wo.to_f16();
                 let ds = data_settings.clone();
-                wq.to_gpu_inplace(&ds.cl.as_ref().unwrap().clone()).unwrap();
-                wk.to_gpu_inplace(&ds.cl.as_ref().unwrap().clone()).unwrap();
-                wv.to_gpu_inplace(&ds.cl.as_ref().unwrap().clone()).unwrap();
-                wo.to_gpu_inplace(&ds.cl.unwrap()).unwrap();
+                if let Some(cl) = &ds.cl
+                {
+                    wq = wq.to_f16().sync_move_to_gpu(cl);
+                    wk = wk.to_f16().sync_move_to_gpu(cl);
+                    wv = wv.to_f16().sync_move_to_gpu(cl);
+                    wo = wo.to_f16().sync_move_to_gpu(cl);
+                }
             }
-        }*/
+        }
         
         Ok(Self {
             wq,
@@ -678,8 +680,9 @@ impl Attention {
         attention_cache: &mut AttentionCache,
     ) -> Tensor {
         let original_x_dtype = x.dtype();
+        let mut  x:Movable = Movable::CPU(x.clone());
         if x.dtype() != self.wq.dtype() {
-            *x = x.to_same_type(&self.wq);
+            x = x.to_same_type_(&self.wq);
         }
 
       /*  #[cfg(feature = "opencl")]
@@ -693,25 +696,24 @@ impl Attention {
             }
         }*/
 
-        let seq_len = x.rows();
-       /*TODO #[cfg(feature = "opencl")]
+        let seq_len = x.rows_();
+       //TODO
+       #[cfg(feature = "opencl")]
         let (xq_out, xk_out, xv_out) = {
-            let mut xq_out = x.matrix_mul_transposed(&self.wq);
-            let mut xk_out = x.matrix_mul_transposed(&self.wk);
-            let mut xv_out = x.matrix_mul_transposed(&self.wv);
-            xq_out.to_cpu_inplace().unwrap();
-            xk_out.to_cpu_inplace().unwrap();
-            xv_out.to_cpu_inplace().unwrap();
-            (xq_out.to_f32(), xk_out.to_f32(), xv_out.to_f32())
+            let mut xq_out = x.matrix_mul_transposed_(&self.wq);
+            let mut xk_out = x.matrix_mul_transposed_(&self.wk);
+            let mut xv_out = x.matrix_mul_transposed_(&self.wv);
+            //moving to cpu with to_f32
+            (xq_out.to_f32().to_tensor(), xk_out.to_f32().to_tensor(), xv_out.to_f32().to_tensor())
         };
 
-        #[cfg(not(feature = "opencl"))]*/
+        #[cfg(not(feature = "opencl"))]
         let (xq_out, (xk_out, xv_out)) = rayon::join(
-            || x.matrix_mul_transposed(&self.wq).to_f32(),
+            || x.matrix_mul_transposed_(&self.wq.to_tensor()).to_f32(),
             || {
                 rayon::join(
-                    || x.matrix_mul_transposed(&self.wk).to_f32(),
-                    || x.matrix_mul_transposed(&self.wv).to_f32(),
+                    || x.matrix_mul_transposed_(&self.wk.to_tensor()).to_f32(),
+                    || x.matrix_mul_transposed_(&self.wv.to_tensor()).to_f32(),
                 )
             },
         );
@@ -812,9 +814,12 @@ impl Attention {
                 }
                 #[cfg(feature = "opencl")]
                 {
-                    let mut xq_row = Tensor::concat(&concat_vec2)
-                        .view(1, self.wo.rows())
-                        .to_f16();
+                    let mut xq_row = Movable::CPU(
+                        Tensor::concat(&concat_vec2)
+                        .view(1, self.wo.rows_())
+                        .to_f16()
+                    );
+                    xq_row = xq_row.sync_move_to_gpu(&self.data_settings.cl.as_ref().unwrap());
                     /* TODO if self.wo.is_on_gpu() {
                         xq_row
                             .to_gpu_inplace(&self.data_settings.cl.as_ref().unwrap())
@@ -823,7 +828,7 @@ impl Attention {
                         result.to_cpu_inplace().unwrap();
                         result.to_f32()
                     } else {*/
-                        xq_row.matrix_mul_transposed(&self.wo)
+                        xq_row.matrix_mul_transposed_(&self.wo).to_tensor()
                    // }
                 }
             })

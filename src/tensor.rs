@@ -76,6 +76,16 @@ pub enum Movable {
 }
 
 impl Movable {
+    pub fn rows_(&self) -> i64 {
+        match &self {
+            Movable::CPU(t) => t.rows(),
+            //TODO
+            #[cfg(feature = "opencl")]
+            Movable::GPU(g) => g.rows(),
+            #[cfg(feature = "opencl")]
+            Movable::Moving(_) => unimplemented!(),
+        }
+    }
     pub fn to_f16(&self) -> Movable {
         match &self {
             Movable::CPU(t) => Movable::CPU(t.to_f16()),
@@ -145,6 +155,33 @@ impl Movable {
 
             #[cfg(feature = "opencl")]
             (Movable::Moving(_), _) => unimplemented!(),
+        }
+    }
+    pub fn matrix_mul_inplace_transposed_(mut self, source: &Movable, other: &Movable) {
+        self = match (self, source, other) {
+            (Movable::CPU(mut s), Movable::CPU(t), Movable::CPU(o)) => {s.matrix_mul_inplace_transposed(&t, &o); Movable::CPU(s)},
+            
+            //TODO
+            (Movable::CPU(s),_,_) => unimplemented!(),
+            #[cfg(feature = "opencl")]
+            (Movable::GPU(mut s), Movable::GPU(t), Movable::GPU(o)) => {
+                match s.matrix_mul_inplace_transposed(&t,&o) {
+                   Ok(e) => {e.wait_for();Movable::GPU(s)},
+                   Err(_) => panic!("unable to do matrix_mul_inplace_transposed on GPUxGPU")
+                }
+            },
+            #[cfg(feature = "opencl")] //move to cpu or to gpu ?
+            (Movable::GPU(g), Movable::CPU(o), _) => {unimplemented!()
+                //if o.cols == 0 || o.rows == 0 {
+                    //panic!("gpu unable to buffer 0 len");
+                //}
+                //self.matrix_mul_transposed_(&other.sync_move_to_gpu(&g.cl()))
+            }
+            #[cfg(feature = "opencl")]
+            (Movable::GPU(_), _, _) => unimplemented!(),
+
+            #[cfg(feature = "opencl")]
+            (Movable::Moving(_), _, _) => unimplemented!(),
         }
     }
     pub fn into_dtype_(&mut self, dtype: TensorDType) -> Movable {
@@ -350,7 +387,18 @@ impl Movable {
             },
         }
     }
-    
+    pub fn finish(&self) {
+        match &self {
+             Movable::CPU(_) => (),
+            #[cfg(feature = "opencl")]
+             Movable::GPU(_) => (),
+            #[cfg(feature = "opencl")]
+            Movable::Moving(m) => match m.moving.wait_for() {
+                Err(_) => (),
+                Ok(_) => (),
+            },
+        }
+    }
     pub fn sync_move_to_cpu(&mut self) -> Movable {
         match self {
             Movable::CPU(t) => Movable::CPU(t.clone()),
