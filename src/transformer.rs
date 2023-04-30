@@ -544,16 +544,19 @@ impl FeedForward {
         if x.dtype() != self.w1.dtype() {
             x = x.to_same_type_(&self.w1);
         }
-      /*  #[cfg(feature = "opencl")]
+        #[cfg(feature = "opencl")]
         let x_was_on_cpu: bool;
         #[cfg(feature = "opencl")]
-        { TODO
-            x_was_on_cpu = x.is_on_cpu();
+        { //TODO
+            //x_was_on_cpu = x.is_on_cpu();
             if self.data_settings.use_opencl_for_feedforward {
-                x.to_gpu_inplace(self.data_settings.cl.as_ref().unwrap())
-                    .unwrap();
+                //x.to_gpu_inplace(self.data_settings.cl.as_ref().unwrap())
+                    //.unwrap();
+                if let Some(cl) = &self.data_settings.cl {
+                 x = x.sync_move_to_gpu(&cl);
+                }
             }
-        }*/
+        }
         
         let (mut w1_out, mut w3_out) = rayon::join(
             || self.w1.matrix_mul_transposed_(&x),
@@ -561,10 +564,10 @@ impl FeedForward {
         );
 
         // Float16 not supported for some of these ops on CPU.
-        if w1_out.dtype() == TensorDType::Float16 {
+        /*if w1_out.dtype() == TensorDType::Float16 {
             w1_out = w1_out.to_f32();
             w3_out = w3_out.to_f32();
-        }
+        }*/
         let w1_out = w1_out.silu();
         let mut w1w3_out = w1_out.hadamard_product_(&w3_out).transpose_();
         

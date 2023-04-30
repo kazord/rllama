@@ -42,7 +42,6 @@ pub struct OpenCLTensor {
     buf: Buffer<u16>, // really is f16
     initial_write_event: Option<ocl::Event>,
     last_event: Option<ocl::Event>,
-    data: *const u16,
     data_layout: Layout,
     nitems: usize,
     rows: i64,
@@ -68,11 +67,6 @@ impl Drop for OpenCLTensor {
                 .unwrap();
         }
         self.initial_write_event = None;
-        if !self.data.is_null() {
-            unsafe {
-                std::alloc::dealloc(self.data as *mut u8, self.data_layout);
-            }
-        }
     }
 }
 unsafe impl Send for OpenCLTensor {}
@@ -163,7 +157,6 @@ impl OpenCL {
                 buf,
                 initial_write_event: Some(event),
                 last_event: None,
-                data,
                 data_layout,
                 nitems,
                 rows,
@@ -179,18 +172,23 @@ impl OpenCL {
         cols: i64,
     ) -> Result<OpenCLTensor, OpenCLError> {
         unsafe {
-            let cols_capacity = if cols % 8 == 0 { cols } else { cols + 8 - cols % 8 };
-            let nitems : usize = rows as usize*cols_capacity as usize;
+            let cols_capacity = if cols % 16 == 0 { cols } else { cols + 16 - cols % 16 };
+            let nitems : usize = (rows*cols_capacity) as usize;
             let data_layout = Layout::from_size_align(nitems * 2, 32).unwrap();
             let buf = Buffer::builder()
                 .queue(self.queue.clone())
                 .len(nitems)
                 .build()?;
+            let mut event = Event::empty();
+            buf.cmd()
+                .fill(0u16, None)
+                .block(true)
+                .enew(&mut event)
+                .enq()?;
             Ok(OpenCLTensor {
                 buf,
                 initial_write_event: None,
                 last_event: None,
-                data: std::ptr::null_mut(),
                 data_layout: data_layout,
                 nitems,
                 rows,
@@ -215,6 +213,9 @@ impl OpenCLTensor {
     }
     pub fn cols(&self) -> i64 {
         self.cols
+    }
+    pub fn nitems(&self) -> usize {
+        self.nitems
     }
     pub fn current_event(&self) -> Option<OpenCLEvent> {
         if let Some(e) = &self.initial_write_event {
@@ -251,12 +252,12 @@ impl OpenCLTensor {
                 .unwrap();
             self.initial_write_event = None;
         }
-        if !self.data.is_null() {
+       /* if !self.data.is_null() {
             unsafe {
                 std::alloc::dealloc(self.data as *mut u8, self.data_layout);
             }
             self.data = std::ptr::null();
-        }
+        }*/
     }
 
     pub fn data_u16_from_gpu(&mut self, data: *mut u16) -> Result<OpenCLEvent, OpenCLError> {
@@ -287,7 +288,7 @@ impl OpenCLTensor {
         other
             .buf
             .cmd()
-            .queue(&other.queue)
+            //.queue(&other.queue)
             .copy(&self.buf, None, None)
             .enew(&mut event)
             .enq()?;
