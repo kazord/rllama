@@ -310,6 +310,31 @@ impl OpenCLTensor {
         self.last_event = Some(event.clone());
         Ok(event.clone())
     }
+    pub fn copy_a_row(&mut self, other: &OpenCLTensor, row: i64) -> Result<OpenCLEvent, OpenCLError> {
+        if other.cols != self.cols {
+            panic!(
+                "Cannot in-place copy tensors of different cols sizes: .x{} <-- .x{}",
+                self.cols, other.cols
+            );
+        }
+        if row < 0 || row > other.rows {
+            panic!(
+                "Cannot in-place copy tensors index {} out of range ..{}",
+                row, other.rows
+            );
+        }
+        let mut event = Event::empty();
+        let offset = row * self.cols_capacity;        
+        other
+            .buf
+            .cmd()
+            //.queue(&other.queue)
+            .copy(&self.buf, Some(offset as usize), Some(self.cols as usize)) //TODO not sure it's ok
+            .enew(&mut event)
+            .enq()?;
+        self.last_event = Some(event.clone());
+        Ok(event.clone())
+    }
     pub fn add_scalar_inplace(&mut self, scalar: f32) -> Result<OpenCLEvent, OpenCLError> {
         let prg = self.cl.programs.lock().unwrap();
         prg.add_scalar_f16.set_arg(0, self.buf.clone()).unwrap();

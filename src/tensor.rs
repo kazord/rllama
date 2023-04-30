@@ -106,6 +106,29 @@ impl Movable {
             Movable::Moving(_) => unimplemented!(),
         }
     }
+    pub fn row_(&self, row: i64) -> Movable {
+        match &self {
+            Movable::CPU(t) => Movable::CPU(t.row(row)),
+            #[cfg(feature = "opencl")]
+            Movable::GPU(s) => {
+                let mut out = s.cl().uninitialized(1, s.cols());
+                match &mut out {
+                    Ok(res) => {
+                        match res.copy_a_row(s, row) {
+                            Ok(e) => {
+                                e.wait_for();
+                                Movable::GPU(res.clone())
+                            },
+                            Err(_) => panic!("unable to copy data on GPU"),
+                        }
+                    }
+                    Err(_) => panic!("unable to init tensor on GPU"),
+                }
+            }
+            #[cfg(feature = "opencl")]
+            Movable::Moving(_) => unimplemented!(),
+        }
+    }
     pub fn is_on_gpu_(&self) -> bool {
         match &self {
             Movable::CPU(_) => false,

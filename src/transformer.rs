@@ -704,16 +704,16 @@ impl Attention {
             let mut xk_out = x.matrix_mul_transposed_(&self.wk);
             let mut xv_out = x.matrix_mul_transposed_(&self.wv);
             //moving to cpu with to_f32
-            (xq_out.to_f32().to_tensor(), xk_out.to_f32().to_tensor(), xv_out.to_f32().to_tensor())
+            (xq_out.to_f32(), xk_out.to_f32(), xv_out.to_f32())
         };
 
         #[cfg(not(feature = "opencl"))]
         let (xq_out, (xk_out, xv_out)) = rayon::join(
-            || x.matrix_mul_transposed_(&self.wq.to_tensor()).to_f32(),
+            || x.matrix_mul_transposed_(&self.wq).to_f32(),
             || {
                 rayon::join(
-                    || x.matrix_mul_transposed_(&self.wk.to_tensor()).to_f32(),
-                    || x.matrix_mul_transposed_(&self.wv.to_tensor()).to_f32(),
+                    || x.matrix_mul_transposed_(&self.wk).to_f32(),
+                    || x.matrix_mul_transposed_(&self.wv).to_f32(),
                 )
             },
         );
@@ -724,13 +724,13 @@ impl Attention {
 
         for idx in 0..seq_len {
             let xq_row = xq_out
-                .row(idx)
+                .row_(idx).to_tensor()
                 .view(self.n_local_heads as i64, self.head_dim as i64);
             let xk_row = xk_out
-                .row(idx)
+                .row_(idx).to_tensor()
                 .view(self.n_local_heads as i64, self.head_dim as i64);
             let xv_row = xv_out
-                .row(idx)
+                .row_(idx).to_tensor()
                 .view(self.n_local_heads as i64, self.head_dim as i64);
 
             let (xq_row, xk_row) =
@@ -807,10 +807,10 @@ impl Attention {
                 let concat_vec2: Vec<&Tensor> = concat_vec.iter().collect();
                 #[cfg(not(feature = "opencl"))]
                 {
-                    let xq_row = Tensor::concat(&concat_vec2).view(1, self.wo.rows());
+                    let mut xq_row = Movable::CPU(Tensor::concat(&concat_vec2).view(1, self.wo.rows_()));
                     xq_row
-                        .into_same_type(&self.wo)
-                        .matrix_mul_transposed(&self.wo)
+                        .to_same_type_(&self.wo)
+                        .matrix_mul_transposed_(&self.wo).to_tensor()
                 }
                 #[cfg(feature = "opencl")]
                 {
