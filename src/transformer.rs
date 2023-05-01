@@ -266,11 +266,16 @@ impl Transformer {
                         let last_layer_on_gpu = (data_settings.percentage_to_gpu
                             * (max_layers - 1) as f32)
                             .round() as usize;
-                        let modulator = if data_settings.percentage_to_gpu == 0.0 { 1 } else { (1.0/data_settings.percentage_to_gpu).floor() as usize};
+                        /*let modulator = if data_settings.percentage_to_gpu == 0.0 { 1 } else { (1.0/data_settings.percentage_to_gpu).floor() as usize};
                         if layer_id % modulator == 0 && layer_id < last_layer_on_gpu*modulator{
                             data_settings.clone()
                         } else {
                             data_settings.clone().dont_use_opencl()
+                        }*/
+                        if layer_id > last_layer_on_gpu {
+                            data_settings.clone().dont_use_opencl()
+                        } else {
+                            data_settings.clone()
                         }
                     }
                     #[cfg(not(feature = "opencl"))]
@@ -441,7 +446,7 @@ impl TransformerBlock {
             mask,
             attention_cache,
         );
-        std::mem::drop(attnorm_out);
+        //std::mem::drop(attnorm_out);
 
         let h = x.add(&att_out);
         let mut att_out = self.ffn_norm.forward(&h);
@@ -522,9 +527,13 @@ impl FeedForward {
                 let ds = data_settings.clone();
                 if let Some(cl) = &ds.cl
                 {
-                    w1 = w1.to_f16().sync_move_to_gpu(cl);
-                    w2 = w2.to_f16().sync_move_to_gpu(cl);
-                    w3 = w3.to_f16().sync_move_to_gpu(cl);
+                    w1 = w1.to_f16().move_to_gpu(cl);
+                    w2 = w2.to_f16().move_to_gpu(cl);
+                    w3 = w3.to_f16().move_to_gpu(cl);
+                    //wait for them
+                    //w1 = w1.wait_for();
+                    //w2 = w2.wait_for();
+                    //w3 = w3.wait_for();
                 }
             }
         }
@@ -552,7 +561,7 @@ impl FeedForward {
             //x_was_on_cpu = x.is_on_cpu();
             if self.data_settings.use_opencl_for_feedforward {
                 if let Some(cl) = &self.data_settings.cl {
-                 x = x.sync_move_to_gpu(&cl);
+                 x = x.move_to_gpu(&cl);
                 }
             }
         }
@@ -652,10 +661,10 @@ impl Attention {
                 let ds = data_settings.clone();
                 if let Some(cl) = &ds.cl
                 {
-                    wq = wq.to_f16().sync_move_to_gpu(cl);
-                    wk = wk.to_f16().sync_move_to_gpu(cl);
-                    wv = wv.to_f16().sync_move_to_gpu(cl);
-                    wo = wo.to_f16().sync_move_to_gpu(cl);
+                    wq = wq.to_f16().move_to_gpu(cl);
+                    wk = wk.to_f16().move_to_gpu(cl);
+                    wv = wv.to_f16().move_to_gpu(cl);
+                    wo = wo.to_f16().move_to_gpu(cl);
                 }
             }
         }
@@ -699,6 +708,13 @@ impl Attention {
         let seq_len = x.rows_();
        //TODO
        #[cfg(feature = "opencl")]
+       if self.data_settings.use_opencl_for_attention {
+            let ds = self.data_settings.clone();
+            if let Some(cl) = &ds.cl
+            {
+                x.sync_move_to_gpu(&cl);
+            }
+       }
         let (xq_out, xk_out, xv_out) = {
             let mut xq_out = x.matrix_mul_transposed_(&self.wq);
             let mut xk_out = x.matrix_mul_transposed_(&self.wk);
@@ -819,21 +835,12 @@ impl Attention {
                         .view(1, self.wo.rows_())
                         .to_f16()
                     );
-                    xq_row = xq_row.sync_move_to_gpu(&self.data_settings.cl.as_ref().unwrap());
-                    /* TODO if self.wo.is_on_gpu() {
-                        xq_row
-                            .to_gpu_inplace(&self.data_settings.cl.as_ref().unwrap())
-                            .unwrap();
-                        let mut result = xq_row.matrix_mul_transposed(&self.wo);
-                        result.to_cpu_inplace().unwrap();
-                        result.to_f32()
-                    } else {*/
-                        xq_row.matrix_mul_transposed_(&self.wo).to_tensor()
-                   // }
+                    xq_row = xq_row.move_to_gpu(&self.data_settings.cl.as_ref().unwrap());
+                    xq_row.matrix_mul_transposed_(&self.wo).to_tensor()
                 }
             })
             .collect();
-
+            //TODO
         let output3: Vec<&Tensor> = output2.iter().collect();
         let output2: Tensor = Tensor::concat(&output3);
         output2.into_dtype(original_x_dtype)
