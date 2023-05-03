@@ -1,9 +1,10 @@
 use crate::data_source::DataSource;
 use crate::embedding::Embedding;
-use crate::tensor::{Movable, FromPiecesDirection, Tensor, TensorDType};
-#[cfg(feature = "opencl")]
-use crate::tensor_opencl_support::OpenCL;
+use crate::tensor::{FromPiecesDirection, Tensor, TensorDType};
+use crate::movable_tensor::MovableTensor;
 use crate::tokenizer::TokenId;
+#[cfg(feature = "opencl")]
+use crate::tensor_opencl_support::{OpenCL, OpenCLError};
 
 use crate::unpickler::UnpicklingError;
 use indicatif::ProgressBar;
@@ -220,10 +221,10 @@ pub struct RMSNorm {
 
 #[allow(dead_code)]
 pub struct Attention {
-    wq: Movable,
-    wk: Movable,
-    wv: Movable,
-    wo: Movable,
+    wq: MovableTensor,
+    wk: MovableTensor,
+    wv: MovableTensor,
+    wo: MovableTensor,
     n_local_heads: usize,
     head_dim: usize,
     data_settings: DataSettings,
@@ -231,9 +232,9 @@ pub struct Attention {
 
 #[allow(dead_code)]
 pub struct FeedForward {
-    w1: Movable,
-    w2: Movable,
-    w3: Movable,
+    w1: MovableTensor,
+    w2: MovableTensor,
+    w3: MovableTensor,
     data_settings: DataSettings,
 }
 
@@ -495,19 +496,19 @@ impl FeedForward {
         data_source: DataSource,
         data_settings: DataSettings,
     ) -> Result<FeedForward, UnpicklingError> {
-        let mut w1 = Movable::CPU(Tensor::from_unpickled_pieces2(
+        let mut w1 = MovableTensor::CPU(Tensor::from_unpickled_pieces2(
             format!("layers.{}.feed_forward.w1.weight", layer_id),
             format!("model.layers.{}.mlp.gate_proj.weight", layer_id),
             data_source.clone(),
             FromPiecesDirection::Rows,
         )?);
-        let mut w2 = Movable::CPU(Tensor::from_unpickled_pieces2(
+        let mut w2 = MovableTensor::CPU(Tensor::from_unpickled_pieces2(
             format!("layers.{}.feed_forward.w2.weight", layer_id),
             format!("model.layers.{}.mlp.down_proj.weight", layer_id),
             data_source.clone(),
             FromPiecesDirection::Cols,
         )?);
-        let mut w3 = Movable::CPU(Tensor::from_unpickled_pieces2(
+        let mut w3 = MovableTensor::CPU(Tensor::from_unpickled_pieces2(
             format!("layers.{}.feed_forward.w3.weight", layer_id),
             format!("model.layers.{}.mlp.up_proj.weight", layer_id),
             data_source.clone(),
@@ -549,10 +550,10 @@ impl FeedForward {
 
     pub fn forward(&self, x: &mut Tensor) -> Tensor {
         let original_x_dtype = x.dtype();
-        let mut  x:Movable = Movable::CPU(x.clone());
+        let mut  x:MovableTensor = MovableTensor::CPU(x.clone());
         //TODO
         if x.dtype() != self.w1.dtype() {
-            x = x.to_same_type_(&self.w1);
+            x = x.to_same_type(&self.w1);
         }
         #[cfg(feature = "opencl")]
         let x_was_on_cpu: bool;
@@ -567,8 +568,8 @@ impl FeedForward {
         }
         
         let (mut w1_out, mut w3_out) = rayon::join(
-            || self.w1.matrix_mul_transposed_(&x),
-            || self.w3.matrix_mul_transposed_(&x),
+            || self.w1.matrix_mul_transposed(&x),
+            || self.w3.matrix_mul_transposed(&x),
         );
 
         // Float16 not supported for some of these ops on CPU.
@@ -577,16 +578,16 @@ impl FeedForward {
             w3_out = w3_out.to_f32();
         }*/
         let w1_out = w1_out.silu();
-        let mut w1w3_out = w1_out.hadamard_product_(&w3_out).transpose_();
+        let mut w1w3_out = w1_out.hadamard_product(&w3_out).transpose();
         
         if w1w3_out.dtype() != self.w2.dtype() {
-            w1w3_out = w1w3_out.to_same_type_(&self.w2);
+            w1w3_out = w1w3_out.to_same_type(&self.w2);
         }
         //#[cfg(not(feature = "opencl"))]
         {
             self.w2
-                .matrix_mul_transposed_(&w1w3_out)
-                .into_dtype_(original_x_dtype).to_tensor()
+                .matrix_mul_transposed(&w1w3_out)
+                .into_dtype(original_x_dtype).to_tensor()
         }
         /*#[cfg(feature = "opencl")]
         {
@@ -650,10 +651,10 @@ impl Attention {
             twv = twv.to_f16();
             two = two.to_f16();
         }
-        let mut wq = Movable::CPU(twq);
-        let mut wk = Movable::CPU(twk);
-        let mut wv = Movable::CPU(twv);
-        let mut wo = Movable::CPU(two);
+        let mut wq = MovableTensor::CPU(twq);
+        let mut wk = MovableTensor::CPU(twk);
+        let mut wv = MovableTensor::CPU(twv);
+        let mut wo = MovableTensor::CPU(two);
         // TODO
         #[cfg(feature = "opencl")]
         {
@@ -689,9 +690,9 @@ impl Attention {
         attention_cache: &mut AttentionCache,
     ) -> Tensor {
         let original_x_dtype = x.dtype();
-        let mut  x:Movable = Movable::CPU(x.clone());
+        let mut  x:MovableTensor = MovableTensor::CPU(x.clone());
         if x.dtype() != self.wq.dtype() {
-            x = x.to_same_type_(&self.wq);
+            x = x.to_same_type(&self.wq);
         }
 
       /*  #[cfg(feature = "opencl")]
@@ -705,7 +706,7 @@ impl Attention {
             }
         }*/
 
-        let seq_len = x.rows_();
+        let seq_len = x.rows();
        //TODO
        #[cfg(feature = "opencl")]
        if self.data_settings.use_opencl_for_attention {
@@ -716,20 +717,20 @@ impl Attention {
             }
        }
         let (xq_out, xk_out, xv_out) = {
-            let mut xq_out = x.matrix_mul_transposed_(&self.wq);
-            let mut xk_out = x.matrix_mul_transposed_(&self.wk);
-            let mut xv_out = x.matrix_mul_transposed_(&self.wv);
+            let mut xq_out = x.matrix_mul_transposed(&self.wq);
+            let mut xk_out = x.matrix_mul_transposed(&self.wk);
+            let mut xv_out = x.matrix_mul_transposed(&self.wv);
             //moving to cpu with to_f32
             (xq_out.to_f32(), xk_out.to_f32(), xv_out.to_f32())
         };
 
         #[cfg(not(feature = "opencl"))]
         let (xq_out, (xk_out, xv_out)) = rayon::join(
-            || x.matrix_mul_transposed_(&self.wq).to_f32(),
+            || x.matrix_mul_transposed(&self.wq).to_f32(),
             || {
                 rayon::join(
-                    || x.matrix_mul_transposed_(&self.wk).to_f32(),
-                    || x.matrix_mul_transposed_(&self.wv).to_f32(),
+                    || x.matrix_mul_transposed(&self.wk).to_f32(),
+                    || x.matrix_mul_transposed(&self.wv).to_f32(),
                 )
             },
         );
@@ -740,13 +741,13 @@ impl Attention {
 
         for idx in 0..seq_len {
             let xq_row = xq_out
-                .row_(idx).to_tensor()
+                .row(idx).to_tensor()
                 .view(self.n_local_heads as i64, self.head_dim as i64);
             let xk_row = xk_out
-                .row_(idx).to_tensor()
+                .row(idx).to_tensor()
                 .view(self.n_local_heads as i64, self.head_dim as i64);
             let xv_row = xv_out
-                .row_(idx).to_tensor()
+                .row(idx).to_tensor()
                 .view(self.n_local_heads as i64, self.head_dim as i64);
 
             let (xq_row, xk_row) =
@@ -823,20 +824,20 @@ impl Attention {
                 let concat_vec2: Vec<&Tensor> = concat_vec.iter().collect();
                 #[cfg(not(feature = "opencl"))]
                 {
-                    let mut xq_row = Movable::CPU(Tensor::concat(&concat_vec2).view(1, self.wo.rows_()));
+                    let mut xq_row = MovableTensor::CPU(Tensor::concat(&concat_vec2).view(1, self.wo.rows()));
                     xq_row
-                        .to_same_type_(&self.wo)
-                        .matrix_mul_transposed_(&self.wo).to_tensor()
+                        .to_same_type(&self.wo)
+                        .matrix_mul_transposed(&self.wo).to_tensor()
                 }
                 #[cfg(feature = "opencl")]
                 {
-                    let mut xq_row = Movable::CPU(
+                    let mut xq_row = MovableTensor::CPU(
                         Tensor::concat(&concat_vec2)
-                        .view(1, self.wo.rows_())
+                        .view(1, self.wo.rows())
                         .to_f16()
                     );
                     xq_row = xq_row.move_to_gpu(&self.data_settings.cl.as_ref().unwrap());
-                    xq_row.matrix_mul_transposed_(&self.wo).to_tensor()
+                    xq_row.matrix_mul_transposed(&self.wo).to_tensor()
                 }
             })
             .collect();

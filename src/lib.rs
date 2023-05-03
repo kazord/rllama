@@ -10,6 +10,7 @@ pub mod rllama_main;
 pub mod semaphore;
 pub mod simd_support;
 pub mod tensor;
+pub mod movable_tensor;
 #[cfg(feature = "opencl")]
 pub mod tensor_opencl_support;
 pub mod token_sampler;
