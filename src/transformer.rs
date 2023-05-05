@@ -528,9 +528,9 @@ impl FeedForward {
                 let ds = data_settings.clone();
                 if let Some(cl) = &ds.cl
                 {
-                    w1 = w1.to_f16().move_to_gpu(cl);
-                    w2 = w2.to_f16().move_to_gpu(cl);
-                    w3 = w3.to_f16().move_to_gpu(cl);
+                    w1 = w1.to_f16().sync_move_to_gpu(cl);
+                    w2 = w2.to_f16().sync_move_to_gpu(cl);
+                    w3 = w3.to_f16().sync_move_to_gpu(cl);
                     //wait for them
                     //w1 = w1.wait_for();
                     //w2 = w2.wait_for();
@@ -562,7 +562,7 @@ impl FeedForward {
             //x_was_on_cpu = x.is_on_cpu();
             if self.data_settings.use_opencl_for_feedforward {
                 if let Some(cl) = &self.data_settings.cl {
-                 x = x.move_to_gpu(&cl);
+                 x = x.sync_move_to_gpu(&cl);
                 }
             }
         }
@@ -662,10 +662,10 @@ impl Attention {
                 let ds = data_settings.clone();
                 if let Some(cl) = &ds.cl
                 {
-                    wq = wq.to_f16().move_to_gpu(cl);
-                    wk = wk.to_f16().move_to_gpu(cl);
-                    wv = wv.to_f16().move_to_gpu(cl);
-                    wo = wo.to_f16().move_to_gpu(cl);
+                    wq = wq.to_f16().sync_move_to_gpu(cl);
+                    wk = wk.to_f16().sync_move_to_gpu(cl);
+                    wv = wv.to_f16().sync_move_to_gpu(cl);
+                    wo = wo.to_f16().sync_move_to_gpu(cl);
                 }
             }
         }
@@ -911,3 +911,4 @@ fn compute_freqs_cis(dim: usize, end: usize, theta: f64) -> FreqsCis {
     }
     resultc
 }
+

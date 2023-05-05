@@ -2,32 +2,33 @@ extern crate rllama;
 #[cfg(feature = "opencl")]
 use rllama::tensor_opencl_support::OpenCL;
 
-use rllama::tensor::{Tensor, TensorDType, Movable};
+use rllama::tensor::{Tensor, TensorDType};
+use rllama::movable_tensor::MovableTensor;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 #[cfg(feature = "opencl")]
 pub fn opencl_benchmarks(c: &mut Criterion) {
-    let mut orig1 = Movable::CPU(Tensor::random(1, 1, TensorDType::Float16));
-    let mut orig16 = Movable::CPU(Tensor::random(1024, 1024, TensorDType::Float16));
-    let mut orig32 = Movable::CPU(Tensor::random(4096, 4096, TensorDType::Float16));
+    let mut orig1 = MovableTensor::CPU(Tensor::random(1, 1, TensorDType::Float16));
+    let mut orig16 = MovableTensor::CPU(Tensor::random(1024, 1024, TensorDType::Float16));
+    let mut orig32 = MovableTensor::CPU(Tensor::random(4096, 4096, TensorDType::Float16));
     let cl = OpenCL::new(false, 0).unwrap();
 
-    let mut mul_left = Movable::CPU(Tensor::random(1024, 1024, TensorDType::Float16));
+    let mut mul_left = MovableTensor::CPU(Tensor::random(1024, 1024, TensorDType::Float16));
     mul_left = mul_left.sync_move_to_gpu(&cl);
-    let mut mul_right = Movable::CPU(Tensor::random(1024, 1024, TensorDType::Float16));
+    let mut mul_right = MovableTensor::CPU(Tensor::random(1024, 1024, TensorDType::Float16));
     mul_right = mul_right.sync_move_to_gpu(&cl);
-    let mut mul_target = Movable::CPU(Tensor::zeros(1024, 1024, TensorDType::Float16));
+    let mut mul_target = MovableTensor::CPU(Tensor::zeros(1024, 1024, TensorDType::Float16));
     mul_target = mul_target.sync_move_to_gpu(&cl);
 
     let mut mul_left_cpu = Tensor::random(1024, 1024, TensorDType::Float32);
     let mut mul_right_cpu = Tensor::random(1024, 1024, TensorDType::Float32);
     let mut mul_target_cpu = Tensor::random(1024, 1024, TensorDType::Float32);
 
-    let mut mul_left1 = Movable::CPU(Tensor::random(4096, 11000, TensorDType::Float16));
-    let mut mul_right1 = Movable::CPU(Tensor::random(1, 11000, TensorDType::Float16));
-    let mut mul_target1 = Movable::CPU(Tensor::zeros(4096, 1, TensorDType::Float16));
-    let mut mul_target2 = Movable::CPU(Tensor::zeros(1, 4096, TensorDType::Float16));
+    let mut mul_left1 = MovableTensor::CPU(Tensor::random(4096, 11000, TensorDType::Float16));
+    let mut mul_right1 = MovableTensor::CPU(Tensor::random(1, 11000, TensorDType::Float16));
+    let mut mul_target1 = MovableTensor::CPU(Tensor::zeros(4096, 1, TensorDType::Float16));
+    let mut mul_target2 = MovableTensor::CPU(Tensor::zeros(1, 4096, TensorDType::Float16));
     mul_left1 = mul_left1.sync_move_to_gpu(&cl);
     mul_right1 = mul_right1.sync_move_to_gpu(&cl);
     mul_target1 = mul_target1.sync_move_to_gpu(&cl);
@@ -37,7 +38,7 @@ pub fn opencl_benchmarks(c: &mut Criterion) {
         "1x11000 to 4096x11000 matrix multiplication transposed on OpenCL",
         |b| {
             b.iter(|| {
-                mul_target2 = black_box(&mul_right1).matrix_mul_transposed_(black_box(&mul_left1));
+                mul_target2 = black_box(&mul_right1).matrix_mul_transposed(black_box(&mul_left1));
             })
         },
     );
@@ -46,7 +47,7 @@ pub fn opencl_benchmarks(c: &mut Criterion) {
         "4096x11000 to 1x11000 matrix multiplication transposed on OpenCL",
         |b| {
             b.iter(|| {
-                mul_target1 = black_box(&mul_left1).matrix_mul_transposed_(black_box(&mul_right1));
+                mul_target1 = black_box(&mul_left1).matrix_mul_transposed(black_box(&mul_right1));
             })
         },
     );
@@ -55,7 +56,7 @@ pub fn opencl_benchmarks(c: &mut Criterion) {
         "1024x1024 matrix multiplication transposed on OpenCL",
         |b| {
             b.iter(|| {
-                mul_target = black_box(&mul_left).matrix_mul_transposed_(black_box(&mul_right));
+                mul_target = black_box(&mul_left).matrix_mul_transposed(black_box(&mul_right));
             })
         },
     );

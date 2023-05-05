@@ -83,7 +83,33 @@ impl MovableTensor {
                                 e.wait_for();
                                 MovableTensor::GPU(res.clone())
                             },
-                            Err(_) => panic!("unable to copy data on GPU"),
+                            Err(a) => panic!("unable to copy data on GPU {:?}", a),
+                        }
+                    }
+                    Err(_) => panic!("unable to init tensor on GPU"),
+                }
+            }
+            #[cfg(feature = "opencl")]
+            MovableTensor::Moving(_) => unimplemented!(),
+        }
+    }
+    pub fn view(&self, rows: i64, cols: i64) -> MovableTensor {
+        match &self {
+            MovableTensor::CPU(t) => MovableTensor::CPU(t.view(rows, cols)),
+            #[cfg(feature = "opencl")]
+            MovableTensor::GPU(s) => {
+                if rows == self.rows() {
+                    return MovableTensor::GPU(s.clone());
+                }
+                let mut out = s.cl().zeros(rows, cols);
+                match &mut out {
+                    Ok(res) => {
+                        match res.view(s) {
+                            Ok(e) => {
+                                e.wait_for();
+                                MovableTensor::GPU(res.clone())
+                            },
+                            Err(a) => panic!("unable to copy data on GPU {:?}", a),
                         }
                     }
                     Err(_) => panic!("unable to init tensor on GPU"),
@@ -119,6 +145,7 @@ impl MovableTensor {
             (MovableTensor::CPU(s),MovableTensor::CPU(o)) => MovableTensor::CPU(s.matrix_mul_transposed(o)),
             
             //TODO
+            #[cfg(feature = "opencl")]
             (MovableTensor::CPU(s),_) => unimplemented!(),
             #[cfg(feature = "opencl")]
             (MovableTensor::GPU(s), MovableTensor::GPU(o)) => {
@@ -150,26 +177,23 @@ impl MovableTensor {
             (MovableTensor::GPU(_), _) => unimplemented!(),
 
             #[cfg(feature = "opencl")]
-            (MovableTensor::Moving(m), _) => {
+            (MovableTensor::Moving(_), _) => {
                 //we need m ready
-                m.moving.wait_for();
-                match m.togpu {
-                    true => MovableTensor::GPU(m.opencltensor.clone()).matrix_mul_transposed(other),
-                    false => MovableTensor::CPU(m.tensor.clone()).matrix_mul_transposed(other),
-                }
+                self.wait_for().matrix_mul_transposed(other)
             }
         }
     }
-    pub fn matrix_mul_inplace_transposed(mut self, source: &MovableTensor, other: &MovableTensor) {
-        self = match (self, source, other) {
-            (MovableTensor::CPU(mut s), MovableTensor::CPU(t), MovableTensor::CPU(o)) => {s.matrix_mul_inplace_transposed(&t, &o); MovableTensor::CPU(s)},
+    pub fn matrix_mul_inplace_transposed(&mut self, source: &MovableTensor, other: &MovableTensor) {
+         match (self, source, other) {
+            (MovableTensor::CPU(ref mut s), MovableTensor::CPU(t), MovableTensor::CPU(o)) => {s.matrix_mul_inplace_transposed(&t, &o)},
             
             //TODO
+            #[cfg(feature = "opencl")]
             (MovableTensor::CPU(s),_,_) => unimplemented!(),
             #[cfg(feature = "opencl")]
-            (MovableTensor::GPU(mut s), MovableTensor::GPU(t), MovableTensor::GPU(o)) => {
+            (MovableTensor::GPU(ref mut s), MovableTensor::GPU(t), MovableTensor::GPU(o)) => {
                 match s.matrix_mul_inplace_transposed(&t,&o) {
-                   Ok(e) => {e.wait_for();MovableTensor::GPU(s)},
+                   Ok(e) => {e.wait_for();},
                    Err(_) => panic!("unable to do matrix_mul_inplace_transposed on GPUxGPU")
                 }
             },
@@ -388,7 +412,12 @@ impl MovableTensor {
             #[cfg(feature = "opencl")]
             MovableTensor::Moving(m) => match m.moving.wait_for() {
                 Err(_) => unimplemented!(),
-                Ok(_) => MovableTensor::GPU(m.opencltensor.clone()),
+                Ok(_) => {
+                    match m.togpu {
+                        true => MovableTensor::GPU(m.opencltensor.clone()),
+                        false => MovableTensor::CPU(m.tensor.clone()),
+                    }
+                },
             },
         }
     }
@@ -535,4 +564,363 @@ impl MovableTensor {
         }
         result*/
      //}
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+    use rand::Rng;
+
+#[cfg(feature = "opencl")]
+    #[test]
+    fn gpu_matrix_mul_transposed_is_close_to_cpu_matrix_mul_transposed_512x1024() {
+        let cl = OpenCL::new(false, 0).unwrap();
+        let a = Tensor::random(512, 1024, TensorDType::Float32);
+        let b = Tensor::random(768, 1024, TensorDType::Float32);
+        let mut a2 = MovableTensor::CPU(a.to_f16());
+        let mut b2 = MovableTensor::CPU(b.to_f16());
+        let mut c = Tensor::random(512, 768, TensorDType::Float32);
+        //let mut c2 = Movable::CPU(Tensor::zeros(512, 768, TensorDType::Float32).to_f16());
+        
+        a2 = a2.sync_move_to_gpu(&cl);
+        b2 = b2.sync_move_to_gpu(&cl);
+        //c2.to_gpu_inplace(&cl).unwrap();
+        let c = a.matrix_mul_transposed(&b);
+        let mut c2 = a2.matrix_mul_transposed(&b2);
+        let c2t = c2.to_tensor();
+        
+        assert_eq!(c2.is_on_gpu(), true);
+        assert_eq!(c.rows(), c2t.rows());
+        assert_eq!(c.cols(), c2t.cols());
+
+        for row in 0..c.rows() {
+            for col in 0..c.cols() {
+                assert_relative_eq!(c.get_f32(row, col), c2t.get_f32(row, col), epsilon = 1e-1);
+            }
+        }
+    }
+    
+    #[cfg(feature = "opencl")]
+    #[test]
+    fn gpu_matrix_mul_transposed_is_close_to_cpu_matrix_mul_transposed_1024x1024() {
+        let cl = OpenCL::new(false, 0).unwrap();
+        let a = Tensor::random(1024, 1024, TensorDType::Float32);
+        let b = Tensor::random(1024, 1024, TensorDType::Float32);
+        let mut a2 = MovableTensor::CPU(a.to_f16());
+        let mut b2 = MovableTensor::CPU(b.to_f16());
+        let mut c = Tensor::random(1024, 1024, TensorDType::Float32);
+        //let mut c2 = Tensor::zeros(1024, 1024, TensorDType::Float32).to_f16();
+        a2 = a2.move_to_gpu(&cl);
+        b2 = b2.move_to_gpu(&cl);
+        a2 = a2.wait_for();
+        b2 = b2.wait_for();
+        //c2.to_gpu_inplace(&cl).unwrap();
+        c.matrix_mul_inplace_transposed(&a, &b);
+        let mut c2 = a2.matrix_mul_transposed(&b2);
+        let c2t = c2.to_tensor();
+
+         assert_eq!(c2.is_on_gpu(), true);
+        assert_eq!(c.rows(), c2t.rows());
+        assert_eq!(c.cols(), c2t.cols());
+
+        for row in 0..c.rows() {
+            for col in 0..c.cols() {
+                assert_relative_eq!(c.get_f32(row, col), c2t.get_f32(row, col), epsilon = 1e-1);
+            }
+        }
+    }
+    
+    #[cfg(feature = "opencl")]
+    #[test]
+    fn gpu_silu_and_cpu_silu_agree() {
+        let cl = OpenCL::new(false, 0).unwrap();
+
+        for _trial in 0..300 {
+            let mut rng = rand::thread_rng();
+            let a = rng.gen_range(1..=300);
+            let b = rng.gen_range(1..=300);
+            let mat1 = Tensor::random(a, b, TensorDType::Float16);
+            let mat2 = MovableTensor::CPU(mat1.clone());
+            let mut mat2 = mat2.to_f16();
+            mat2 = mat2.sync_move_to_gpu(&cl);
+
+            let mat1_result = mat1.silu();
+            let mut mat2_result = mat2.silu();
+            let mut mat2_result_tensor = mat2_result.sync_move_to_cpu().to_tensor();
+
+            assert_eq!(mat1_result.rows(), mat2_result_tensor.rows());
+            assert_eq!(mat1_result.cols(), mat2_result_tensor.cols());
+
+            for row in 0..mat1_result.rows() {
+                for col in 0..mat1_result.cols() {
+                    assert_relative_eq!(
+                        mat1_result.get_f32(row, col),
+                        mat2_result_tensor.get_f32(row, col),
+                        epsilon = 1e-2
+                    );
+                }
+            }
+        }
+    }
+    
+    #[cfg(feature = "opencl")]
+    #[test]
+    fn gpu_hadamard_product_and_cpu_hadamard_product_agree() {
+        let cl = OpenCL::new(false, 0).unwrap();
+
+        for _trial in 0..300 {
+            let mut rng = rand::thread_rng();
+            let a = rng.gen_range(1..=300);
+            let b = rng.gen_range(1..=300);
+            let mat1 = Tensor::random(a, b, TensorDType::Float16);
+            let mat2 = Tensor::random(a, b, TensorDType::Float16);
+
+            let mut mat1_gpu = MovableTensor::CPU(mat1.to_f16());
+            let mut mat2_gpu = MovableTensor::CPU(mat2.to_f16());
+            mat1_gpu = mat1_gpu.sync_move_to_gpu(&cl);
+            mat2_gpu = mat2_gpu.sync_move_to_gpu(&cl);
+
+            let result1 = mat1.hadamard_product(&mat2);
+            let mut result2 = mat1_gpu.hadamard_product(&mat2_gpu).sync_move_to_cpu().to_tensor();
+
+            assert_eq!(result1.rows(), result2.rows());
+            assert_eq!(result1.cols(), result2.cols());
+
+            for row in 0..result1.rows() {
+                for col in 0..result2.cols() {
+                    assert_relative_eq!(
+                        result1.get_f32(row, col),
+                        result2.get_f32(row, col),
+                        epsilon = 1e-2
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "opencl")]
+    #[test]
+    fn gpu_transpose_and_cpu_transpose_agree() {
+        let cl = OpenCL::new(false, 0).unwrap();
+        let mut rng = rand::thread_rng();
+        for _trial in 0..300 {
+            let a = rng.gen_range(1..=100);
+            let b = rng.gen_range(1..=100);
+            let mat1 = Tensor::random(a, b, TensorDType::Float16);
+            let mut mat1_gpu = MovableTensor::CPU(mat1.to_f16());
+            mat1_gpu = mat1_gpu.sync_move_to_gpu(&cl);
+
+            let mat1_transposed = mat1.transpose();
+            let mut mat1_gpu_transposed = mat1_gpu.transpose().sync_move_to_cpu().to_tensor();
+
+            assert_eq!(mat1_transposed.rows(), mat1_gpu_transposed.rows());
+            assert_eq!(mat1_transposed.cols(), mat1_gpu_transposed.cols());
+
+            for row in 0..mat1_transposed.rows() {
+                for col in 0..mat1_transposed.cols() {
+                    assert_relative_eq!(
+                        mat1_transposed.get_f32(row, col),
+                        mat1_gpu_transposed.get_f32(row, col),
+                        epsilon = 1e-2,
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "opencl")]
+    #[test]
+    fn gpu_matrix_mul_transposed_is_close_to_cpu_matrix_mul_transposed() {
+        let cl = OpenCL::new(false, 0).unwrap();
+        let mut rng = rand::thread_rng();
+
+        for _trial in 0..300 {
+            let a = rng.gen_range(1..=300);
+            let b = rng.gen_range(1..=300);
+            let c = rng.gen_range(1..=300);
+
+            let mat1 = Tensor::random(a, b, TensorDType::Float16);
+            let mat2 = Tensor::random(c, b, TensorDType::Float16);
+            let mat3 = Tensor::random(a, c, TensorDType::Float16);
+            let mut mat1_gpu = MovableTensor::CPU(mat1.clone()).sync_move_to_gpu(&cl);
+            let mut mat2_gpu = MovableTensor::CPU(mat2.clone()).sync_move_to_gpu(&cl);
+            let mut mat3_gpu = MovableTensor::CPU(mat3.clone()).sync_move_to_gpu(&cl);
+           
+            let mat1 = mat1.to_f32();
+            let mat2 = mat2.to_f32();
+            let mut mat3 = mat3.to_f32();
+
+            mat3.matrix_mul_inplace_transposed(&mat1, &mat2);
+            mat3_gpu.matrix_mul_inplace_transposed(&mat1_gpu, &mat2_gpu);
+            let mat3_gpu = mat3_gpu.sync_move_to_cpu().to_tensor();
+
+            assert_eq!(mat3.rows(), mat3_gpu.rows());
+            assert_eq!(mat3.cols(), mat3_gpu.cols());
+
+            for row in 0..mat3.rows() {
+                for col in 0..mat3.cols() {
+                    assert_relative_eq!(
+                        mat3.get_f32(row, col),
+                        mat3_gpu.get_f32(row, col),
+                        epsilon = 1e-2,
+                    );
+                }
+            }
+        }
+    }
+    
+    #[cfg(feature = "opencl")]
+    #[test]
+    fn gpu_matrix_mul_vector_transposed_is_close_to_cpu_matrix_mul_vector_transposed_1() {
+        let cl = OpenCL::new(false, 0).unwrap();
+        let mut rng = rand::thread_rng();
+
+        // src.rows == 1
+
+        for _trial in 0..300 {
+            let a = rng.gen_range(1..=300);
+            let b = rng.gen_range(1..=300);
+
+            let mat1 = Tensor::random(1, a, TensorDType::Float16);
+            let mat2 = Tensor::random(b, a, TensorDType::Float16);
+            let mat3 = Tensor::random(1, b, TensorDType::Float16);
+            let mut mat1_gpu = MovableTensor::CPU(mat1.clone()).sync_move_to_gpu(&cl);
+            let mut mat2_gpu = MovableTensor::CPU(mat2.clone()).sync_move_to_gpu(&cl);
+            let mut mat3_gpu = MovableTensor::CPU(mat3.clone()).sync_move_to_gpu(&cl);
+
+            let mat1 = mat1.to_f32();
+            let mat2 = mat2.to_f32();
+            let mut mat3 = mat3.to_f32();
+
+            mat3.matrix_mul_inplace_transposed(&mat1, &mat2);
+            mat3_gpu.matrix_mul_inplace_transposed(&mat1_gpu, &mat2_gpu);
+            let mat3_gpu = mat3_gpu.sync_move_to_cpu().to_tensor();
+
+            assert_eq!(mat3.rows(), mat3_gpu.rows());
+            assert_eq!(mat3.cols(), mat3_gpu.cols());
+
+            for row in 0..mat3.rows() {
+                for col in 0..mat3.cols() {
+                    assert_relative_eq!(
+                        mat3.get_f32(row, col),
+                        mat3_gpu.get_f32(row, col),
+                        epsilon = 1e-2,
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "opencl")]
+    #[test]
+    fn gpu_matrix_mul_vector_transposed_is_close_to_cpu_matrix_mul_vector_transposed_2() {
+        let cl = OpenCL::new(false, 0).unwrap();
+        let mut rng = rand::thread_rng();
+
+        // other.rows == 1
+
+        for _trial in 0..300 {
+            let a = rng.gen_range(1..=300);
+            let b = rng.gen_range(1..=300);
+
+            let mat1 = Tensor::random(a, b, TensorDType::Float16);
+            let mat2 = Tensor::random(1, b, TensorDType::Float16);
+            let mat3 = Tensor::random(a, 1, TensorDType::Float16);
+            let mut mat1_gpu = MovableTensor::CPU(mat1.clone()).sync_move_to_gpu(&cl);
+            let mut mat2_gpu = MovableTensor::CPU(mat2.clone()).sync_move_to_gpu(&cl);
+            let mut mat3_gpu = MovableTensor::CPU(mat3.clone()).sync_move_to_gpu(&cl);
+
+            let mat1 = mat1.to_f32();
+            let mat2 = mat2.to_f32();
+            let mut mat3 = mat3.to_f32();
+
+            mat3.matrix_mul_inplace_transposed(&mat1, &mat2);
+            mat3_gpu.matrix_mul_inplace_transposed(&mat1_gpu, &mat2_gpu);
+            let mat3_gpu = mat3_gpu.sync_move_to_cpu().to_tensor();
+
+            assert_eq!(mat3.rows(), mat3_gpu.rows());
+            assert_eq!(mat3.cols(), mat3_gpu.cols());
+
+            for row in 0..mat3.rows() {
+                for col in 0..mat3.cols() {
+                    assert_relative_eq!(
+                        mat3.get_f32(row, col),
+                        mat3_gpu.get_f32(row, col),
+                        epsilon = 1e-2,
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(feature = "opencl")]
+    #[test]
+    fn gpu_row_is_close_to_cpu_row() {
+        let cl = OpenCL::new(false, 0).unwrap();
+
+        for _trial in 0..300 {
+            let mut rng = rand::thread_rng();
+            let a = rng.gen_range(1..=300);
+            let b = rng.gen_range(1..=300);
+            let c = rng.gen_range(0..=a-1);
+            let mat1 = Tensor::random(a, b, TensorDType::Float16);
+            let mat2 = MovableTensor::CPU(mat1.clone());
+            let mut mat2 = mat2.to_f16();
+            mat2 = mat2.sync_move_to_gpu(&cl);
+
+            let mat1_result = mat1.row(c);
+            let mut mat2_result = mat2.row(c);
+            let mut mat2_result_tensor = mat2_result.sync_move_to_cpu().to_tensor();
+
+            assert_eq!(mat1_result.rows(), mat2_result_tensor.rows());
+            assert_eq!(mat1_result.cols(), mat2_result_tensor.cols());
+
+            for row in 0..mat1_result.rows() {
+                for col in 0..mat1_result.cols() {
+                    assert_relative_eq!(
+                        mat1_result.get_f32(row, col),
+                        mat2_result_tensor.get_f32(row, col),
+                        epsilon = 1e-2
+                    );
+                }
+            }
+        }
+    }
+
+      #[cfg(feature = "opencl")]
+    #[test]
+    fn gpu_view_is_close_to_cpu_view() {
+        let cl = OpenCL::new(false, 0).unwrap();
+
+        for _trial in 0..300 {
+            let mut rng = rand::thread_rng();
+            let a = rng.gen_range(1..=300);
+            let b = rng.gen_range(1..=300);
+            let mut c = rng.gen_range(1..=a-1);
+            while (a * b) % c != 0 {
+                c -= 1
+            }
+            let d = (a * b) / c;
+            let mat1 = Tensor::random(a, b, TensorDType::Float16);
+            let mat2 = MovableTensor::CPU(mat1.clone());
+            let mut mat2 = mat2.to_f16();
+            mat2 = mat2.sync_move_to_gpu(&cl);
+
+            let mat1_result = mat1.view(c,d);
+            let mut mat2_result = mat2.view(c,d);
+            let mut mat2_result_tensor = mat2_result.sync_move_to_cpu().to_tensor();
+
+            assert_eq!(mat1_result.rows(), mat2_result_tensor.rows());
+            assert_eq!(mat1_result.cols(), mat2_result_tensor.cols());
+
+            for row in 0..mat1_result.rows() {
+                for col in 0..mat1_result.cols() {
+                    assert_relative_eq!(
+                        mat1_result.get_f32(row, col),
+                        mat2_result_tensor.get_f32(row, col),
+                        epsilon = 1e-2
+                    );
+                }
+            }
+        }
+    }
 }

@@ -8,6 +8,7 @@ use ocl::{
 };
 use std::alloc::Layout;
 use std::sync::{Arc, Mutex};
+use std::cmp::min;
 use thiserror::Error;
 
 #[derive(Debug)]
@@ -93,6 +94,8 @@ pub enum OpenCLError {
     OpenCL(#[from] ocl::Error),
     #[error("Cannot select device")]
     OpenCLDeviceSelection,
+    #[error("Cannot select device")]
+    OpenCLViewFunc,
 }
 
 impl OpenCL {
@@ -214,6 +217,38 @@ impl OpenCL {
             })
         }
     }
+    pub fn zeros(&self, 
+        rows: i64,
+        cols: i64,
+    ) -> Result<OpenCLTensor, OpenCLError> {
+        unsafe {
+            let cols_capacity = if cols % 16 == 0 { cols } else { cols + 16 - cols % 16 };
+            let nitems : usize = (rows*cols_capacity) as usize;
+            let data_layout = Layout::from_size_align(nitems * 2, 32).unwrap();
+            let buf = Buffer::builder()
+                .queue(self.queue.clone())
+                .len(nitems)
+                .build()?;
+            let mut event = Event::empty();
+            buf.cmd()
+                .fill(0u16, None)
+                .block(false)
+                .enew(&mut event)
+                .enq()?;
+            Ok(OpenCLTensor {
+                buf,
+                initial_write_event: None,
+                last_event: None,
+                data_layout: data_layout,
+                nitems,
+                rows,
+                cols,
+                cols_capacity,
+                queue: self.queue.clone(),
+                cl: self.clone(),
+            })
+        }
+    }
 }
 
 impl OpenCLTensor {
@@ -303,7 +338,7 @@ impl OpenCLTensor {
         other
             .buf
             .cmd()
-            //.queue(&other.queue)
+            .queue(&other.queue)
             .copy(&self.buf, None, None)
             .enew(&mut event)
             .enq()?;
@@ -324,16 +359,65 @@ impl OpenCLTensor {
             );
         }
         let mut event = Event::empty();
-        let offset = row * self.cols_capacity;        
+        let offset = row * other.cols_capacity;    
         other
             .buf
             .cmd()
-            //.queue(&other.queue)
-            .copy(&self.buf, Some(offset as usize), Some(self.cols as usize)) //TODO not sure it's ok
+            .queue(&other.queue)
+            .offset(offset as usize)
+            .copy(&self.buf, None, Some(other.cols as usize))
             .enew(&mut event)
             .enq()?;
         self.last_event = Some(event.clone());
         Ok(event.clone())
+        
+    }
+    pub fn view(&mut self, other: &OpenCLTensor) -> Result<OpenCLEvent, OpenCLError> {
+        if other.cols * other.rows != self.cols *self.rows {
+            panic!(
+                "Cannot view tensors from a different sizes: {}x{} <-- {}x{}",
+                self.rows, self.cols, other.rows, other.cols
+            );
+        }
+        
+        
+        let mut src_row = 0;
+        let mut src_col = 0;
+        let mut dst_row = 0;
+        let mut dst_col = 0;
+        while src_row < other.rows && src_col < other.cols {
+            let mut event = Event::empty();
+            let max_len_in_row = std::cmp::min(other.cols - src_col, self.cols - dst_col);
+            let src_offset = src_row * other.cols_capacity + src_col;
+            let dst_offset = dst_row * self.cols_capacity + dst_col;
+            other
+                    .buf
+                    .cmd()
+                    .queue(&other.queue)
+                    .offset(src_offset as usize)
+                    .copy(&self.buf, Some(dst_offset as usize), Some(max_len_in_row as usize))
+                    .enew(&mut event)
+                    .enq()?;
+            src_col += max_len_in_row;
+            dst_col += max_len_in_row;
+            if src_col >= other.cols {
+                src_col = 0;
+                src_row += 1;
+            }
+            if dst_col >= self.cols {
+                dst_col = 0;
+                dst_row += 1;
+            }
+            self.last_event = Some(event.clone());
+        }
+        
+        if let Some(e) = &self.last_event {
+            Ok(e.clone())
+        }
+        else {
+            Err(OpenCLError::OpenCLViewFunc)
+        }
+        
     }
     pub fn add_scalar_inplace(&mut self, scalar: f32) -> Result<OpenCLEvent, OpenCLError> {
         let prg = self.cl.programs.lock().unwrap();
